@@ -32,6 +32,15 @@ This design ensures the frequency counter is always useful - providing a precisi
 | 18  | SDA (I2C for SiT5501) | Always available |
 | 19  | SCL (I2C for SiT5501) | Always available |
 
+## Serial Commands
+
+Key commands available via serial interface:
+- `s` - Show system status
+- `f<freq>` - Set output frequency (e.g., `f10` for 10 Hz)
+- `p<ppm>` - Set oscillator frequency offset (e.g., `p+2.5`)
+- `b` - Reboot to bootloader mode for firmware updates (orange LED will blink)
+- `h` - Show complete help menu
+
 ## Usage Examples
 
 See `examples/` directory for:

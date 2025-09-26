@@ -39,7 +39,8 @@ This precision frequency counter now supports dual-mode operation with comprehen
 - `d` - Disable oscillator output
 
 ### Other Commands
-- Any other key - Reset frequency measurement averaging
+- `h` - Show help menu
+- `b` - Reboot to bootloader mode for firmware updates
 
 ## Example Usage Sessions
 
@@ -68,6 +69,17 @@ This precision frequency counter now supports dual-mode operation with comprehen
 > Oscillator frequency offset set to 2.500 PPM
 > r                    # Verify setting
 > SiT5501 current setting: 2.500000 PPM
+```
+
+### Firmware Update Session
+```
+> b                    # Reboot to bootloader mode
+> Rebooting to bootloader mode...
+> Device will disconnect and enter bootloader for firmware updates.
+# Device disconnects and enters Teensy bootloader mode
+# Orange LED will blink indicating bootloader is active
+# Use Teensy Loader or Arduino IDE to upload new firmware
+# No need to press the program button manually
 ```
 
 ## Pin Configuration Summary
