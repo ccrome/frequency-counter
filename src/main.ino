@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SD.h>
 #include <SPI.h>
+#include <EEPROM.h>
 #include "Gpt2FreqMeter.h"
 #include "pins.h"
 #include "SiT5501.h"
@@ -46,6 +47,21 @@ static bool g_pause_updates = false;
 static bool g_verbose_timing = false;  // Start with verbose timing off
 static String g_current_log_file = "";
 static File g_log_file;
+
+// Persistent frequency offset (stored in EEPROM)
+static double g_frequency_offset_ppm = 0.0;  // Default 0.0 ppm (originally 15.26 ppb = 0.01526 ppm)
+
+// EEPROM data structure
+struct EepromData {
+  uint32_t magic;              // Magic number for validity check
+  uint16_t version;            // Data structure version
+  double frequency_offset_ppm; // Frequency offset in PPM
+  uint16_t checksum;           // Simple checksum for data integrity
+};
+
+static const uint32_t EEPROM_MAGIC = 0x12345678;
+static const uint16_t EEPROM_VERSION = 1;
+static const int EEPROM_DATA_ADDR = 0;
 
 
 const char* rmc_source_map[] = {
@@ -105,35 +121,37 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	    // Calculate derived values
 	    double freq_hz = (double)g_pps_data.ticks;  // ticks = Hz for 1 second PPS
 	    
-	    g_log_file.printf("{"
-		      "\"gps_timestamp\":\"%s\","
-		      "\"gps_source\":\"%s\","
-		      "\"gps_lat\":%s,"
-		      "\"gps_lon\":%s,"
-		      "\"gps_speed\":%s,"
-		      "\"gps_course\":%s,"
-		      "\"gps_magnetic_variation\":%s,"
-		      "\"ticks\":%lu,"
-		      "\"freq_hz\":%s,"
-		      "\"avg_freq_hz\":%s,"
-		      "\"ppm_instantaneous\":%s,"
-		      "\"ppm_average\":%s,"
-		      "\"elapsed_sec\":%lu"
-		      "}\n",
-		      g_gps_data.timestamp.c_str(),
-		      g_gps_data.source.c_str(),
-		      float_to_json_string(g_gps_data.latitude, 6).c_str(),
-		      float_to_json_string(g_gps_data.longitude, 6).c_str(),
-		      float_to_json_string(g_gps_data.speed, 4).c_str(),
-		      float_to_json_string(g_gps_data.course, 2).c_str(),
-		      float_to_json_string(g_gps_data.magnetic_variation, 4).c_str(),
-		      g_pps_data.ticks,
-		      float_to_json_string(freq_hz, 6).c_str(),
-		      float_to_json_string(g_pps_data.avg_freq_hz, 12).c_str(),
-		      float_to_json_string(g_pps_data.ppm_instantaneous, 6).c_str(),
-		      float_to_json_string(g_pps_data.ppm_average, 6).c_str(),
-		      g_pps_data.elapsed_sec
-	    );
+		g_log_file.printf("{"
+				  "\"gps_timestamp\":\"%s\","
+				  "\"gps_source\":\"%s\","
+				  "\"gps_lat\":%s,"
+				  "\"gps_lon\":%s,"
+				  "\"gps_speed\":%s,"
+				  "\"gps_course\":%s,"
+				  "\"gps_magnetic_variation\":%s,"
+				  "\"ticks\":%lu,"
+				  "\"freq_hz\":%s,"
+				  "\"avg_freq_hz\":%s,"
+				  "\"ppm_instantaneous\":%s,"
+				  "\"ppm_average\":%s,"
+				  "\"oscillator_offset_ppm\":%s,"
+				  "\"elapsed_sec\":%lu"
+				  "}\n",
+				  g_gps_data.timestamp.c_str(),
+				  g_gps_data.source.c_str(),
+				  float_to_json_string(g_gps_data.latitude, 6).c_str(),
+				  float_to_json_string(g_gps_data.longitude, 6).c_str(),
+				  float_to_json_string(g_gps_data.speed, 4).c_str(),
+				  float_to_json_string(g_gps_data.course, 2).c_str(),
+				  float_to_json_string(g_gps_data.magnetic_variation, 4).c_str(),
+				  g_pps_data.ticks,
+				  float_to_json_string(freq_hz, 6).c_str(),
+				  float_to_json_string(g_pps_data.avg_freq_hz, 12).c_str(),
+				  float_to_json_string(g_pps_data.ppm_instantaneous, 6).c_str(),
+				  float_to_json_string(g_pps_data.ppm_average, 6).c_str(),
+				  float_to_json_string(g_frequency_offset_ppm, 6).c_str(),
+				  g_pps_data.elapsed_sec
+			);
 	    g_log_file.flush();
 	    
 	    // Reset frequency data flag after logging
@@ -194,7 +212,8 @@ void print_oscillator_commands() {
   Serial.println("SiT5501 Oscillator Control:\r");
   Serial.println("  p<ppm>  - Set frequency offset in PPM (e.g., p+5.2 or p-3.1)\r");
   Serial.println("  p0      - Reset to center frequency (0 PPM)\r");
-  Serial.println("  o       - Read current oscillator settings\r");
+  Serial.println("  o<ppm>  - Set persistent frequency offset in PPM (e.g., o0.01526 or o-5.0)\r");
+  Serial.println("  o       - Show current persistent frequency offset\r");
   Serial.println("  e       - Enable oscillator output\r");
   Serial.println("  z       - Disable oscillator output\r");
 }
@@ -265,16 +284,77 @@ void setup() {
   initialize_sd_card();
   initialize_gpt2();
   initialize_oscillator();
+  load_frequency_offset();  // Load persistent frequency offset
 
   print_help();
   Serial.println("System initialized in Dual Mode. 1 PPS output active, GPS PPS monitoring enabled.\r\n");
-  oscillator.setFrequencyOffsetPPM(15.26/1000.0); // 15.26ppb
+  
+  // Apply the loaded frequency offset
+  oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
+  Serial.printf("Applied frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
 }
 
 
 void reset_measurement_stats() {
   g_sum_hz = 0.0;
   g_sample_count = 0;
+}
+
+uint16_t calculate_checksum(const EepromData& data) {
+  uint16_t checksum = 0;
+  const uint8_t* bytes = (const uint8_t*)&data;
+  
+  // Calculate checksum for all fields except checksum itself
+  size_t checksum_offset = offsetof(EepromData, checksum);
+  for (size_t i = 0; i < checksum_offset; i++) {
+    checksum += bytes[i];
+  }
+  
+  return checksum;
+}
+
+void load_frequency_offset() {
+  EepromData data;
+  EEPROM.get(EEPROM_DATA_ADDR, data);
+  
+  // Validate magic number and version
+  if (data.magic != EEPROM_MAGIC || data.version != EEPROM_VERSION) {
+    Serial.println("EEPROM data invalid or outdated, using defaults\r");
+    g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
+    save_frequency_offset();
+    return;
+  }
+  
+  // Validate checksum
+  uint16_t calculated_checksum = calculate_checksum(data);
+  if (data.checksum != calculated_checksum) {
+    Serial.println("EEPROM checksum invalid, using defaults\r");
+    g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
+    save_frequency_offset();
+    return;
+  }
+  
+  // Validate frequency offset range
+  if (isnan(data.frequency_offset_ppm) || data.frequency_offset_ppm < -1000.0 || data.frequency_offset_ppm > 1000.0) {
+    Serial.println("EEPROM frequency offset out of range, using defaults\r");
+    g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
+    save_frequency_offset();
+    return;
+  }
+  
+  g_frequency_offset_ppm = data.frequency_offset_ppm;
+  Serial.printf("Loaded frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+}
+
+void save_frequency_offset() {
+  EepromData data;
+  data.magic = EEPROM_MAGIC;
+  data.version = EEPROM_VERSION;
+  data.frequency_offset_ppm = g_frequency_offset_ppm;
+  data.checksum = calculate_checksum(data);
+  
+  EEPROM.put(EEPROM_DATA_ADDR, data);
+  Serial.printf("Saved frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
 }
 
 bool initialize_sd_card() {
@@ -333,6 +413,30 @@ void cmd_set_output_frequency(const String& command) {
     Serial.printf("Signal available on pin %d\r\n", GPT2_COMPARE_PIN);
   } else {
     Serial.println("Error: Frequency must be between 1 and 1000000 Hz\r");
+  }
+}
+
+void cmd_set_frequency_offset(const String& command) {
+  String param = command.substring(1);
+  param.trim();
+  
+  if (param.length() == 0) {
+    // Show current offset
+    Serial.printf("Current frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+    return;
+  }
+  
+  double offset = param.toFloat();
+  if (offset >= -1000.0 && offset <= 1000.0) {
+    g_frequency_offset_ppm = offset;
+    save_frequency_offset();  // Save to EEPROM
+    
+    // Apply the new offset to oscillator
+    oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
+    
+    Serial.printf("Frequency offset set to: %.6f ppm\r\n", g_frequency_offset_ppm);
+  } else {
+    Serial.println("Error: Frequency offset must be between -1000.0 and 1000.0 ppm\r");
   }
 }
 
@@ -672,7 +776,7 @@ void handle_serial_commands() {
       if (c < 32 || c > 126) continue;
 
         // Check if this is a parameter command that needs more input
-        if (c == 'f' || c == 'p' || c == 'd') {
+        if (c == 'f' || c == 'p' || c == 'd' || c == 'o') {
           command_buffer = String(c);
           reading_parameter_command = true;
           continue;
@@ -729,6 +833,7 @@ void process_parameter_command(String command) {
     case 'f': cmd_set_output_frequency(command); break;
     case 'p': cmd_set_oscillator_ppm(command); break;
     case 'd': cmd_download_log_file(command); break;
+    case 'o': cmd_set_frequency_offset(command); break;
     default:
       Serial.println("Unknown parameter command.\r");
       break;
