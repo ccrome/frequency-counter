@@ -15,10 +15,10 @@ void check_gpt2_counter() {
   uint32_t count2 = GPT2_CNT;
 
   if (count2 > count1) {
-    Serial.printf("GPT2 counter is running: %lu -> %lu (diff: %lu)\r\n",
+    Serial.printf("GPT2 counter is running: %lu -> %lu (diff: %lu)\r\n", 
                   (unsigned long)count1, (unsigned long)count2, (unsigned long)(count2 - count1));
   } else if (count2 < count1) {
-    Serial.printf("GPT2 counter wrapped: %lu -> %lu\r\n",
+    Serial.printf("GPT2 counter wrapped: %lu -> %lu\r\n", 
                   (unsigned long)count1, (unsigned long)count2);
   } else {
     Serial.printf("WARNING: GPT2 counter not counting! Stuck at: %lu\r\n", (unsigned long)count1);
@@ -36,10 +36,10 @@ void increase_peripheral_clock() {
   cscmr1 &= ~(0x3F << 0);
   cscmr1 |= CCM_CSCMR1_PERCLK_PODF(1);
   CCM_CSCMR1 = cscmr1;
-
+  
   Serial.printf("New CCM_CSCMR1 = 0x%08lX\r\n", (unsigned long)CCM_CSCMR1);
   Serial.println("PERCLK increased to ~75MHz (10MHz < 75MHz/4 = 18.75MHz ✅)\r");
-
+  
   delay(10);
 }
 
@@ -62,14 +62,16 @@ void print_oscillator_commands() {
   Serial.println("  p0      - Reset to center frequency (0 PPM)\r");
   Serial.println("  o       - Read current oscillator settings\r");
   Serial.println("  e       - Enable oscillator output\r");
-  Serial.println("  d       - Disable oscillator output\r");
+  Serial.println("  z       - Disable oscillator output\r");
 }
 
 void print_other_commands() {
   Serial.println("Other:\r");
   Serial.println("  h       - Show this help\r");
   Serial.println("  b       - Reboot to bootloader mode\r");
-  Serial.println("  x       - Dump SD card log file to console\r");
+  Serial.println("  x       - Dump current SD card log file to console\r");
+  Serial.println("  l       - List all log files on SD card\r");
+  Serial.println("  d<ID>   - Download specific log file by ID (e.g., d0)\r");
 }
 
 void print_help() {
@@ -377,6 +379,161 @@ void cmd_dump_measurements() {
   g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
 }
 
+void cmd_list_log_files() {
+  Serial.println("\r\n=== SD Card Log Files ===\r");
+  
+  if (!g_sd_available) {
+    Serial.println("SD card not available.\r");
+    return;
+  }
+  
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("Failed to open root directory.\r");
+    return;
+  }
+  
+  Serial.println("Available log files:\r");
+  Serial.println("ID  Filename          Size (bytes)  Modified\r");
+  Serial.println("--  ----------------  ------------  --------\r");
+  
+  uint32_t file_count = 0;
+  File entry = root.openNextFile();
+  while (entry) {
+    String filename = entry.name();
+    
+    // Only show .jsonl files (our log files)
+    if (filename.endsWith(".jsonl") || filename.endsWith(".JSONL")) {
+      Serial.printf("%2lu  %-16s  %12lu  ", 
+                    file_count, 
+                    filename.c_str(), 
+                    entry.size());
+      
+      // Show if this is the current active log file
+      if (filename.equals(g_current_log_file)) {
+        Serial.printf("(current)\r\n");
+      } else {
+        Serial.printf("\r\n");
+      }
+      file_count++;
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+  
+  if (file_count == 0) {
+    Serial.println("No log files found.\r");
+  } else {
+    Serial.printf("\r\nTotal: %lu log files\r\n", file_count);
+    Serial.println("Use 'd<ID>' to download a specific file (e.g., 'd0' for first file)\r");
+  }
+}
+
+void cmd_download_log_file(String command) {
+  Serial.println("\r\n=== Download Log File ===\r");
+  Serial.println("Pausing periodic updates...\r");
+  g_pause_updates = true;
+  
+  if (!g_sd_available) {
+    Serial.println("SD card not available.\r");
+    g_pause_updates = false;
+    return;
+  }
+  
+  // Parse file ID from command (e.g., "d0", "d1", etc.)
+  if (command.length() < 2) {
+    Serial.println("Usage: d<ID> (e.g., d0 for first file)\r");
+    Serial.println("Use 'l' to list available files.\r");
+    g_pause_updates = false;
+    return;
+  }
+  
+  uint32_t file_id = command.substring(1).toInt();
+  
+  // Find the file by ID
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("Failed to open root directory.\r");
+    g_pause_updates = false;
+    return;
+  }
+  
+  String target_filename = "";
+  uint32_t current_id = 0;
+  File entry = root.openNextFile();
+  while (entry) {
+    String filename = entry.name();
+    
+    // Only consider .jsonl files
+    if (filename.endsWith(".jsonl") || filename.endsWith(".JSONL")) {
+      if (current_id == file_id) {
+        target_filename = filename;
+        entry.close();
+        break;
+      }
+      current_id++;
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+  
+  if (target_filename.length() == 0) {
+    Serial.printf("File ID %lu not found. Use 'l' to list available files.\r\n", file_id);
+    g_pause_updates = false;
+    return;
+  }
+  
+  // Close current log file if it's the same as target
+  if (target_filename.equals(g_current_log_file) && g_log_file) {
+    g_log_file.flush();
+    g_log_file.close();
+  }
+  
+  // Open target file for reading
+  File download_file = SD.open(target_filename.c_str(), FILE_READ);
+  if (!download_file) {
+    Serial.printf("Failed to open file: %s\r\n", target_filename.c_str());
+    g_pause_updates = false;
+    
+    // Reopen current log file if needed
+    if (target_filename.equals(g_current_log_file)) {
+      g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
+    }
+    return;
+  }
+  
+  Serial.printf("Downloading: %s\r\n", target_filename.c_str());
+  Serial.printf("File size: %lu bytes\r\n", download_file.size());
+  Serial.println("----------------------------------------\r");
+  
+  // Stream file contents
+  uint32_t line_count = 0;
+  while (download_file.available()) {
+    String line = download_file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      Serial.printf("%s\r\n", line.c_str());
+      line_count++;
+    }
+  }
+  
+  download_file.close();
+  
+  Serial.println("----------------------------------------\r");
+  Serial.printf("Download complete: %lu lines\r\n", line_count);
+  Serial.println("Resuming periodic updates automatically...\r");
+  
+  // Automatically resume updates
+  g_pause_updates = false;
+  
+  // Reopen current log file if it was the target
+  if (target_filename.equals(g_current_log_file)) {
+    g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
+  }
+}
+
 void cmd_reboot_to_bootloader() {
   Serial.println("Rebooting to bootloader mode...\r");
   Serial.println("Device will disconnect and enter bootloader for firmware updates.\r");
@@ -414,16 +571,16 @@ void handle_serial_commands() {
       // Skip whitespace and control characters for single commands
       if (c < 32 || c > 126) continue;
 
-      // Check if this is a parameter command that needs more input
-      if (c == 'f' || c == 'p') {
-        command_buffer = String(c);
-        reading_parameter_command = true;
-        continue;
-      }
+        // Check if this is a parameter command that needs more input
+        if (c == 'f' || c == 'p' || c == 'd') {
+          command_buffer = String(c);
+          reading_parameter_command = true;
+          continue;
+        }
 
       // Process single-character commands immediately
       process_single_command(c);
-    } else {
+      } else {
       // Reading parameter for f or p commands
       if (c == '\n' || c == '\r') {
         // Process complete parameter command
@@ -444,10 +601,11 @@ void process_single_command(char cmd) {
     case 'c': cmd_set_capture_edge(); break;
     case 'o': cmd_read_oscillator(); break;
     case 'e': cmd_oscillator_output_enable(true); break;
-    case 'd': cmd_oscillator_output_enable(false); break;
+    case 'z': cmd_oscillator_output_enable(false); break;
     case 'h': print_help(); break;
     case 'b': cmd_reboot_to_bootloader(); break;
     case 'x': cmd_dump_measurements(); break;
+    case 'l': cmd_list_log_files(); break;
     default:
       Serial.println("Unknown command. Type 'h' for help.\r");
       break;
@@ -466,6 +624,7 @@ void process_parameter_command(String command) {
   switch (cmd) {
     case 'f': cmd_set_output_frequency(command); break;
     case 'p': cmd_set_oscillator_ppm(command); break;
+    case 'd': cmd_download_log_file(command); break;
     default:
       Serial.println("Unknown parameter command.\r");
       break;
@@ -481,7 +640,7 @@ void process_frequency_measurement() {
   double freq_hz = (double)ticks;
   const double ref_hz = 10000000.0;  // 10 MHz reference
 
-  if (freq_hz < ref_hz * 0.95 || freq_hz > ref_hz * 1.05) {
+    if (freq_hz < ref_hz * 0.95 || freq_hz > ref_hz * 1.05) {
     Serial.printf("WARNING: GPS PPS freq = %.6f Hz is outside 95-105%% of ref_hz = %.6f Hz\r\n", 
                   freq_hz, ref_hz);
     return;
@@ -499,10 +658,10 @@ void display_frequency_results(uint32_t ticks, double ref_hz) {
   double avg_hz = (g_sample_count == 0) ? 0.0 : (g_sum_hz / (double)g_sample_count);
   uint32_t elapsed_sec = g_sample_count;
 
-  double ppm_inst = ((freq_hz - ref_hz) / ref_hz) * 1e6;
+      double ppm_inst = ((freq_hz - ref_hz) / ref_hz) * 1e6;
   double ppm_avg = ((avg_hz - ref_hz) / ref_hz) * 1e6;
 
-  double mhz_latest = freq_hz / 1e6;
+      double mhz_latest = freq_hz / 1e6;
   double mhz_avg = avg_hz / 1e6;
 
   // Only display if not paused
