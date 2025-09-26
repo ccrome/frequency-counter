@@ -4,9 +4,64 @@
 #include "Gpt2FreqMeter.h"
 #include "pins.h"
 #include "SiT5501.h"
-
+#include <ArduinoNmeaParser.h>
+void onRmcUpdate(nmea::RmcData const rmc);
 
 SiT5501 oscillator(0x60);
+ArduinoNmeaParser parser(onRmcUpdate, nullptr);
+// Global variables for frequency measurement
+static double g_sum_hz = 0.0;
+static uint32_t g_sample_count = 0;
+
+// SD card logging
+static bool g_sd_available = false;
+static bool g_pause_updates = false;
+static bool g_verbose_timing = false;  // Start with verbose timing off
+static String g_current_log_file = "";
+static String g_nmea_log_file = "";
+static File g_log_file;
+static File g_nmea_file;
+
+
+const char* rmc_source_map[] = {
+    "Unknown", "GPS", "Galileo", "GLONASS", "GNSS", "BDS"
+};
+
+String float_to_json_string(double value, int precision) {
+  if (isnan(value)) {
+    return "null";
+  }
+  return String(value, precision);
+}
+
+void onRmcUpdate(nmea::RmcData const rmc)
+{
+    if (rmc.is_valid) {
+	nmea::RmcSource rmc_source = rmc.source;
+	if (rmc_source > nmea::RmcSource::BDS)
+	    rmc_source = nmea::RmcSource::Unknown;
+	int rmc_source_i = static_cast<int>(nmea::RmcSource::GPS);
+	const char *rmc_source_s = rmc_source_map[rmc_source_i];
+
+	
+	g_nmea_file.printf("{"
+		      "\"timestamp\":\"%4d-%02d-%02dT%2d:%2d:%2dZ\","
+		      "\"source\":\"%s\","
+		      "\"latlon\":[%s, %s],"
+		      "\"speed\":%s,"
+		      "\"course\":%s,"
+		      "\"magnetic_variation\":%.4f}\n",
+		      rmc.date.year, rmc.date.month, rmc.date.day,
+		      rmc.time_utc.hour, rmc.time_utc.minute, rmc.time_utc.second,
+		      rmc_source_s,
+		      float_to_json_string(rmc.latitude, 6).c_str(),
+		      float_to_json_string(rmc.longitude, 6).c_str(),
+		      float_to_json_string(rmc.speed, 4).c_str(),
+		      float_to_json_string(rmc.course, 2).c_str(),
+		      float_to_json_string(rmc.magnetic_variation, 2).c_str()
+	    );
+    }
+}
 
 void check_gpt2_counter() {
   Serial.println("Checking if GPT2 counter is running...\r");
@@ -68,6 +123,7 @@ void print_oscillator_commands() {
 void print_other_commands() {
   Serial.println("Other:\r");
   Serial.println("  h       - Show this help\r");
+  Serial.println("  v       - Toggle verbose timing output (currently OFF)\r");
   Serial.println("  b       - Reboot to bootloader mode\r");
   Serial.println("  x       - Dump current SD card log file to console\r");
   Serial.println("  l       - List all log files on SD card\r");
@@ -133,20 +189,9 @@ void setup() {
 
   print_help();
   Serial.println("System initialized in Dual Mode. 1 PPS output active, GPS PPS monitoring enabled.\r\n");
+  oscillator.setFrequencyOffsetPPM(15.26/1000.0); // 15.26ppb
 }
 
-
-// Global variables for frequency measurement
-static double g_sum_hz = 0.0;
-static uint32_t g_sample_count = 0;
-
-// SD card logging
-static bool g_sd_available = false;
-static bool g_pause_updates = false;
-static String g_current_log_file = "";
-static String g_nema_log_file = "";
-static File g_log_file;
-static File g_nema_file;
 
 void reset_measurement_stats() {
   g_sum_hz = 0.0;
@@ -169,10 +214,10 @@ bool initialize_sd_card() {
     } while (SD.exists(filename) && file_num < 10000);
 
     g_current_log_file = String(filename);
-    g_nema_log_file = g_current_log_file + ".nema";
+    g_nmea_log_file = g_current_log_file + ".nmea";
     g_log_file = SD.open(filename, FILE_WRITE);
-    g_nema_file = SD.open(g_nema_log_file.c_str(), FILE_WRITE);
-    Serial.printf("Just opened %s as %d\r\n", g_nema_log_file.c_str(), g_nema_file);
+    g_nmea_file = SD.open(g_nmea_log_file.c_str(), FILE_WRITE);
+    Serial.printf("Just opened %s as %d\r\n", g_nmea_log_file.c_str(), g_nmea_file);
     if (g_log_file) {
       Serial.printf("Created log file: %s (JSON Lines format)\r\n", filename);
       return true;
@@ -387,8 +432,8 @@ void cmd_dump_measurements() {
 bool is_valid_filename(String filename) {
     return (filename.endsWith(".jsonl") ||
 	    filename.endsWith(".JSONL") ||
-	    filename.endsWith(".nema")  ||
-	    filename.endsWith(".NEMA")
+	    filename.endsWith(".nmea")  ||
+	    filename.endsWith(".NMEA")
 	);
 }
 void cmd_list_log_files() {
@@ -618,6 +663,10 @@ void process_single_command(char cmd) {
     case 'b': cmd_reboot_to_bootloader(); break;
     case 'x': cmd_dump_measurements(); break;
     case 'l': cmd_list_log_files(); break;
+    case 'v': 
+      g_verbose_timing = !g_verbose_timing;
+      Serial.printf("Verbose timing: %s\r\n", g_verbose_timing ? "ON" : "OFF");
+      break;
     default:
       Serial.println("Unknown command. Type 'h' for help.\r");
       break;
@@ -676,8 +725,8 @@ void display_frequency_results(uint32_t ticks, double ref_hz) {
       double mhz_latest = freq_hz / 1e6;
   double mhz_avg = avg_hz / 1e6;
 
-  // Only display if not paused
-  if (!g_pause_updates) {
+  // Only display if not paused and verbose timing is enabled
+  if (!g_pause_updates && g_verbose_timing) {
     Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppm(lat)=%.3f ppm(avg)=%.6f\r\n",
                   (unsigned long)elapsed_sec, ticks, mhz_latest, mhz_avg, ppm_inst, ppm_avg);
   }
@@ -702,19 +751,17 @@ void print_oscillator_status() {
   }
 }
 
-void process_nema_messages(void) {
+void process_nmea_messages(void) {
     while (Serial1.available()) {
-	char c = Serial1.read();
-	g_nema_file.printf("%c", c);
+	parser.encode((char)Serial1.read());
     }
-    g_nema_file.flush();
+    g_nmea_file.flush();
 }
 
 void loop() {
   handle_serial_commands();
 
-
   // Always process GPS PPS measurements (if available)
   process_frequency_measurement();
-  process_nema_messages();
+  process_nmea_messages();
 }
