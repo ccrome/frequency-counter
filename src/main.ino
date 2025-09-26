@@ -6,6 +6,7 @@
 #include "pins.h"
 #include "SiT5501.h"
 #include <ArduinoNmeaParser.h>
+#include "FileManager.h"
 void onRmcUpdate(nmea::RmcData const rmc);
 
 SiT5501 oscillator(0x60);
@@ -47,6 +48,7 @@ static bool g_pause_updates = false;
 static bool g_verbose_timing = false;  // Start with verbose timing off
 static String g_current_log_file = "";
 static File g_log_file;
+
 
 // Persistent frequency offset (stored in EEPROM)
 static double g_frequency_offset_ppm = 0.0;  // Default 0.0 ppm (originally 15.26 ppb = 0.01526 ppm)
@@ -223,9 +225,9 @@ void print_other_commands() {
   Serial.println("  h       - Show this help\r");
   Serial.println("  v       - Toggle verbose timing output (currently OFF)\r");
   Serial.println("  b       - Reboot to bootloader mode\r");
-  Serial.println("  x       - Dump current SD card log file to console\r");
   Serial.println("  l       - List all log files on SD card\r");
-  Serial.println("  d<ID>   - Download specific log file by ID (e.g., d0)\r");
+  Serial.println("  d<ID>   - Download log file to console by ID (e.g., d0)\r");
+  Serial.println("  x<ID>   - Download log file via XMODEM protocol by ID (e.g., x0)\r");
 }
 
 void print_help() {
@@ -292,6 +294,8 @@ void setup() {
   // Apply the loaded frequency offset
   oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
   Serial.printf("Applied frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+
+  // XMODEM implementation is self-contained - no initialization needed
 }
 
 
@@ -479,7 +483,7 @@ void cmd_set_oscillator_ppm(const String& command) {
   double ppm = command.substring(1).toFloat();
   if (oscillator.setFrequencyOffsetPPM(ppm)) {
     Serial.printf("Oscillator frequency offset set to %.3f PPM\r\n", ppm);
-  } else {
+      } else {
     Serial.println("Error: PPM out of range (±3200 PPM max) or I2C error\r");
   }
 }
@@ -576,13 +580,6 @@ void cmd_dump_measurements() {
 }
 
 
-bool is_valid_filename(String filename) {
-    return (filename.endsWith(".jsonl") ||
-	    filename.endsWith(".JSONL") ||
-	    filename.endsWith(".nmea")  ||
-	    filename.endsWith(".NMEA")
-	);
-}
 void cmd_list_log_files() {
   Serial.println("\r\n=== SD Card Log Files ===\r");
   
@@ -591,47 +588,7 @@ void cmd_list_log_files() {
     return;
   }
   
-  File root = SD.open("/");
-  if (!root) {
-    Serial.println("Failed to open root directory.\r");
-    return;
-  }
-  
-  Serial.println("Available log files:\r");
-  Serial.println("ID  Filename          Size (bytes)  Modified\r");
-  Serial.println("--  ----------------  ------------  --------\r");
-  
-  uint32_t file_count = 0;
-  File entry = root.openNextFile();
-  while (entry) {
-    String filename = entry.name();
-    
-    // Only show .jsonl files (our log files)
-    if (is_valid_filename(filename)) {
-      Serial.printf("%2lu  %-16s  %12lu  ", 
-                    file_count, 
-                    filename.c_str(), 
-                    entry.size());
-      
-      // Show if this is the current active log file
-      if (filename.equals(g_current_log_file)) {
-        Serial.printf("(current)\r\n");
-      } else {
-        Serial.printf("\r\n");
-      }
-      file_count++;
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-  root.close();
-  
-  if (file_count == 0) {
-    Serial.println("No log files found.\r");
-  } else {
-    Serial.printf("\r\nTotal: %lu log files\r\n", file_count);
-    Serial.println("Use 'd<ID>' to download a specific file (e.g., 'd0' for first file)\r");
-  }
+  list_log_files(g_current_log_file);
 }
 
 void cmd_download_log_file(String command) {
@@ -655,36 +612,12 @@ void cmd_download_log_file(String command) {
   
   uint32_t file_id = command.substring(1).toInt();
   
-  // Find the file by ID
-  File root = SD.open("/");
-  if (!root) {
-    Serial.println("Failed to open root directory.\r");
-    g_pause_updates = false;
-    return;
-  }
-  
-  String target_filename = "";
-  uint32_t current_id = 0;
-  File entry = root.openNextFile();
-  while (entry) {
-    String filename = entry.name();
-    
-    // Only consider .jsonl files
-    if (is_valid_filename(filename)) {
-      if (current_id == file_id) {
-        target_filename = filename;
-        entry.close();
-        break;
-      }
-      current_id++;
-    }
-    entry.close();
-    entry = root.openNextFile();
-  }
-  root.close();
+  // Get filename by ID using FileManager
+  String target_filename = get_filename_by_id(file_id);
   
   if (target_filename.length() == 0) {
-    Serial.printf("File ID %lu not found. Use 'l' to list available files.\r\n", file_id);
+    uint32_t file_count = get_file_count();
+    Serial.printf("File ID %lu not found. Available range: 0-%lu\r\n", file_id, file_count - 1);
     g_pause_updates = false;
     return;
   }
@@ -738,6 +671,181 @@ void cmd_download_log_file(String command) {
   }
 }
 
+// Simple XMODEM sender implementation
+bool xmodem_send_file(File& file, Stream& serial) {
+  const uint8_t SOH = 0x01;    // Start of Header
+  const uint8_t EOT = 0x04;    // End of Transmission
+  const uint8_t ACK = 0x06;    // Acknowledge
+  const uint8_t NAK = 0x15;    // Negative Acknowledge
+  const uint8_t CAN = 0x18;    // Cancel
+  const uint8_t SUB = 0x1A;    // Substitute (padding)
+  
+  uint8_t block_num = 1;
+  uint8_t buffer[128];
+  
+  // Wait for receiver to send NAK (start request)
+  unsigned long timeout = millis() + 60000; // 60 second timeout
+  while (millis() < timeout) {
+    if (serial.available()) {
+      uint8_t c = serial.read();
+      if (c == NAK) break;
+      if (c == CAN) return false;
+    }
+    delay(100);
+  }
+  
+  if (millis() >= timeout) return false;
+  
+  // Send file blocks
+  while (file.available()) {
+    // Read block data
+    size_t bytes_read = file.read(buffer, 128);
+    
+    // Pad with SUB if needed
+    if (bytes_read < 128) {
+      memset(buffer + bytes_read, SUB, 128 - bytes_read);
+    }
+    
+    // Calculate checksum
+    uint8_t checksum = 0;
+    for (int i = 0; i < 128; i++) {
+      checksum += buffer[i];
+    }
+    
+    // Send block with retries
+    bool block_acked = false;
+    for (int retry = 0; retry < 10 && !block_acked; retry++) {
+      // Send block header
+      serial.write(SOH);
+      serial.write(block_num);
+      serial.write(255 - block_num);
+      
+      // Send data
+      serial.write(buffer, 128);
+      
+      // Send checksum
+      serial.write(checksum);
+      serial.flush();
+      
+      // Wait for ACK/NAK
+      timeout = millis() + 3000;
+      while (millis() < timeout) {
+        if (serial.available()) {
+          uint8_t response = serial.read();
+          if (response == ACK) {
+            block_acked = true;
+            break;
+          } else if (response == NAK) {
+            break; // Retry
+          } else if (response == CAN) {
+            return false;
+          }
+        }
+        delay(10);
+      }
+    }
+    
+    if (!block_acked) return false;
+    block_num++;
+  }
+  
+  // Send EOT
+  for (int retry = 0; retry < 10; retry++) {
+    serial.write(EOT);
+    serial.flush();
+    
+    timeout = millis() + 3000;
+    while (millis() < timeout) {
+      if (serial.available()) {
+        uint8_t response = serial.read();
+        if (response == ACK) return true;
+        if (response == CAN) return false;
+        break; // Retry on NAK or other
+      }
+      delay(10);
+    }
+  }
+  
+  return false;
+}
+
+void cmd_xmodem_transfer(String command) {
+  Serial.println("\r\n=== XMODEM File Transfer ===\r");
+  Serial.println("Pausing periodic updates...\r");
+  g_pause_updates = true;
+  
+  if (!g_sd_available) {
+    Serial.println("SD card not available.\r");
+    g_pause_updates = false;
+    return;
+  }
+  
+  // Parse file ID from command (e.g., "x0", "x1", etc.)
+  if (command.length() < 2) {
+    Serial.println("Usage: x<ID> (e.g., x0 for first file)\r");
+    Serial.println("Use 'l' to list available files.\r");
+    g_pause_updates = false;
+    return;
+  }
+  
+  uint32_t file_id = command.substring(1).toInt();
+  
+  // Get filename by ID using FileManager
+  String target_filename = get_filename_by_id(file_id);
+  
+  if (target_filename.length() == 0) {
+    uint32_t file_count = get_file_count();
+    Serial.printf("File ID %lu not found. Available range: 0-%lu\r\n", file_id, file_count - 1);
+    g_pause_updates = false;
+    return;
+  }
+  
+  // Close current log file if it's the same as target
+  if (target_filename.equals(g_current_log_file) && g_log_file) {
+    g_log_file.flush();
+    g_log_file.close();
+  }
+  
+  // Open target file for reading
+  File transfer_file = SD.open(target_filename.c_str(), FILE_READ);
+  if (!transfer_file) {
+    Serial.printf("Failed to open file: %s\r\n", target_filename.c_str());
+    g_pause_updates = false;
+    
+    // Reopen current log file if needed
+    if (target_filename.equals(g_current_log_file)) {
+      g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
+    }
+    return;
+  }
+  
+  Serial.printf("Starting XMODEM transfer: %s\r\n", target_filename.c_str());
+  Serial.printf("File size: %lu bytes\r\n", transfer_file.size());
+  Serial.println("Waiting for receiver to initiate transfer...\r");
+  Serial.println("(Use XMODEM receive in your terminal program)\r");
+  
+  // Use our simple XMODEM implementation to send file over USB Serial
+  bool success = xmodem_send_file(transfer_file, Serial);
+  
+  transfer_file.close();
+  
+  if (success) {
+    Serial.println("\r\nXMODEM transfer completed successfully!\r");
+  } else {
+    Serial.println("\r\nXMODEM transfer failed or was cancelled.\r");
+  }
+  
+  Serial.println("Resuming periodic updates automatically...\r");
+  
+  // Automatically resume updates
+  g_pause_updates = false;
+  
+  // Reopen current log file if it was the target
+  if (target_filename.equals(g_current_log_file)) {
+    g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
+  }
+}
+
 void cmd_reboot_to_bootloader() {
   Serial.println("Rebooting to bootloader mode...\r");
   Serial.println("Device will disconnect and enter bootloader for firmware updates.\r");
@@ -775,8 +883,11 @@ void handle_serial_commands() {
       // Skip whitespace and control characters for single commands
       if (c < 32 || c > 126) continue;
 
+      // Echo the character
+      Serial.print(c);
+
         // Check if this is a parameter command that needs more input
-        if (c == 'f' || c == 'p' || c == 'd' || c == 'o') {
+        if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'o') {
           command_buffer = String(c);
           reading_parameter_command = true;
           continue;
@@ -787,12 +898,20 @@ void handle_serial_commands() {
       } else {
       // Reading parameter for f or p commands
       if (c == '\n' || c == '\r') {
+        // Echo newline
+        Serial.println();
         // Process complete parameter command
         process_parameter_command(command_buffer);
         command_buffer = "";
         reading_parameter_command = false;
+      } else if (c == 8 || c == 127) {  // Backspace or DEL
+        if (command_buffer.length() > 0) {
+          command_buffer.remove(command_buffer.length() - 1);
+          Serial.print("\b \b");  // Backspace, space, backspace to erase character
+        }
       } else if (c >= 32 && c <= 126) {  // Printable characters only
         command_buffer += c;
+        Serial.print(c);  // Echo the character
       }
     }
   }
@@ -808,7 +927,6 @@ void process_single_command(char cmd) {
     case 'z': cmd_oscillator_output_enable(false); break;
     case 'h': print_help(); break;
     case 'b': cmd_reboot_to_bootloader(); break;
-    case 'x': cmd_dump_measurements(); break;
     case 'l': cmd_list_log_files(); break;
     case 'v': 
       g_verbose_timing = !g_verbose_timing;
@@ -833,6 +951,7 @@ void process_parameter_command(String command) {
     case 'f': cmd_set_output_frequency(command); break;
     case 'p': cmd_set_oscillator_ppm(command); break;
     case 'd': cmd_download_log_file(command); break;
+    case 'x': cmd_xmodem_transfer(command); break;
     case 'o': cmd_set_frequency_offset(command); break;
     default:
       Serial.println("Unknown parameter command.\r");
