@@ -142,17 +142,23 @@ def plot_gps_map(df):
     if len(gps_data) == 0:
         return None
     
-    # Calculate mean position
+    # Remove duplicate coordinates to reduce plot size
+    gps_data_unique = gps_data.drop_duplicates(subset=['gps_lat', 'gps_lon'])
+    
+    # Calculate mean position from all data (not just unique points)
     mean_lat = gps_data['gps_lat'].mean()
     mean_lon = gps_data['gps_lon'].mean()
+    
+    print(f"GPS data points: {len(gps_data)} total, {len(gps_data_unique)} unique")
+    print(f"Mean position: {mean_lat:.6f}, {mean_lon:.6f}")
     
     # Create map figure
     fig = go.Figure()
     
-    # Add individual GPS points
+    # Add unique GPS points only
     fig.add_trace(go.Scattermapbox(
-        lat=gps_data['gps_lat'],
-        lon=gps_data['gps_lon'],
+        lat=gps_data_unique['gps_lat'],
+        lon=gps_data_unique['gps_lon'],
         mode='markers',
         marker=dict(
             size=8,
@@ -160,26 +166,45 @@ def plot_gps_map(df):
             opacity=0.6
         ),
         name='GPS Points',
-        text=[f"Point {i+1}" for i in range(len(gps_data))],
+        text=[f"Point {i+1}" for i in range(len(gps_data_unique))],
         hovertemplate="<b>GPS Point %{text}</b><br>" +
                      "Lat: %{lat:.6f}<br>" +
                      "Lon: %{lon:.6f}<br>" +
                      "<extra></extra>"
     ))
     
-    # Add mean position
+    # Add mean position - try multiple approaches
     fig.add_trace(go.Scattermapbox(
         lat=[mean_lat],
         lon=[mean_lon],
         mode='markers',
         marker=dict(
-            size=15,
+            size=30,
             color='red',
-            symbol='star'
+            opacity=1.0
         ),
-        name='Mean Position',
+        name='Mean Position (RED CIRCLE)',
         text=['Mean'],
         hovertemplate="<b>Mean Position</b><br>" +
+                     "Lat: %{lat:.6f}<br>" +
+                     "Lon: %{lon:.6f}<br>" +
+                     "<extra></extra>"
+    ))
+    
+    # Add another marker with different symbol to see what works
+    fig.add_trace(go.Scattermapbox(
+        lat=[mean_lat],
+        lon=[mean_lon],
+        mode='markers',
+        marker=dict(
+            size=25,
+            color='yellow',
+            symbol='circle',
+            opacity=1.0
+        ),
+        name='Mean Position (YELLOW)',
+        text=['Mean2'],
+        hovertemplate="<b>Mean Position (Yellow)</b><br>" +
                      "Lat: %{lat:.6f}<br>" +
                      "Lon: %{lon:.6f}<br>" +
                      "<extra></extra>"
@@ -267,10 +292,18 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
     # Calculate statistics
     ppb_mean = ppb_error.mean()
     ppb_std = ppb_error.std()
+    ppm_mean = ppb_mean / 1000
+    
+    # Calculate updated offset if oscillator_offset_ppm exists
+    offset_info = ""
+    if 'oscillator_offset_ppm' in df.columns:
+        current_offset = df['oscillator_offset_ppm'].iloc[0]  # Should be constant
+        updated_offset = current_offset + ppm_mean
+        offset_info = f" | Current Offset: {current_offset:.6f} ppm | Updated Offset: {updated_offset:.6f} ppm"
     
     # Update layout with cleaner titles
     fig.update_layout(
-        title=f"Clock Source Stability Analysis (Mean: {ppb_mean:.2f} PPB, Std: {ppb_std:.2f} PPB)",
+        title=f"Clock Source Stability Analysis (Mean: {ppb_mean:.2f} PPB, Std: {ppb_std:.2f} PPB{offset_info})",
         xaxis_title=x_title,
         yaxis_title="Error (PPB)",
         showlegend=True,
