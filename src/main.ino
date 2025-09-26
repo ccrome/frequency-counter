@@ -120,8 +120,8 @@ void initialize_oscillator() {
     oscillator.setOutputEnable(true);
   }
 }
-
 void setup() {
+  Serial1.begin(9600);
   setup_pins();
   Serial.begin(115200);
   wait_for_serial();
@@ -144,7 +144,9 @@ static uint32_t g_sample_count = 0;
 static bool g_sd_available = false;
 static bool g_pause_updates = false;
 static String g_current_log_file = "";
+static String g_nema_log_file = "";
 static File g_log_file;
+static File g_nema_file;
 
 void reset_measurement_stats() {
   g_sum_hz = 0.0;
@@ -167,8 +169,10 @@ bool initialize_sd_card() {
     } while (SD.exists(filename) && file_num < 10000);
 
     g_current_log_file = String(filename);
+    g_nema_log_file = g_current_log_file + ".nema";
     g_log_file = SD.open(filename, FILE_WRITE);
-
+    g_nema_file = SD.open(g_nema_log_file.c_str(), FILE_WRITE);
+    Serial.printf("Just opened %s as %d\r\n", g_nema_log_file.c_str(), g_nema_file);
     if (g_log_file) {
       Serial.printf("Created log file: %s (JSON Lines format)\r\n", filename);
       return true;
@@ -379,6 +383,14 @@ void cmd_dump_measurements() {
   g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
 }
 
+
+bool is_valid_filename(String filename) {
+    return (filename.endsWith(".jsonl") ||
+	    filename.endsWith(".JSONL") ||
+	    filename.endsWith(".nema")  ||
+	    filename.endsWith(".NEMA")
+	);
+}
 void cmd_list_log_files() {
   Serial.println("\r\n=== SD Card Log Files ===\r");
   
@@ -403,7 +415,7 @@ void cmd_list_log_files() {
     String filename = entry.name();
     
     // Only show .jsonl files (our log files)
-    if (filename.endsWith(".jsonl") || filename.endsWith(".JSONL")) {
+    if (is_valid_filename(filename)) {
       Serial.printf("%2lu  %-16s  %12lu  ", 
                     file_count, 
                     filename.c_str(), 
@@ -466,7 +478,7 @@ void cmd_download_log_file(String command) {
     String filename = entry.name();
     
     // Only consider .jsonl files
-    if (filename.endsWith(".jsonl") || filename.endsWith(".JSONL")) {
+    if (is_valid_filename(filename)) {
       if (current_id == file_id) {
         target_filename = filename;
         entry.close();
@@ -689,13 +701,20 @@ void print_oscillator_status() {
     Serial.println("SiT5501: Not present\r");
   }
 }
-bool offset = false;
+
+void process_nema_messages(void) {
+    while (Serial1.available()) {
+	char c = Serial1.read();
+	g_nema_file.printf("%c", c);
+    }
+    g_nema_file.flush();
+}
+
 void loop() {
   handle_serial_commands();
 
 
   // Always process GPS PPS measurements (if available)
   process_frequency_measurement();
-
-  delay(1);
+  process_nema_messages();
 }
