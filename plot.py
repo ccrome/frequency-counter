@@ -3,6 +3,8 @@ import plotly.graph_objects as go
 import pandas as pd
 import json
 import os
+import sys
+import argparse
 from scipy.signal import butter, filtfilt, sosfiltfilt
 
 def load_log_file(filepath):
@@ -39,15 +41,53 @@ def load_json_log(filepath):
     """Load JSON format log file."""
     data = []
     with open(filepath, 'r') as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.strip()
             if line:
                 try:
+                    # Skip incomplete lines (like just "}")
+                    if line in ['{', '}', ',']:
+                        print(f"Skipping incomplete line {line_num} in {filepath}: '{line}'")
+                        continue
                     data.append(json.loads(line))
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    print(f"Skipping malformed JSON line {line_num} in {filepath}: {e}")
                     continue  # Skip malformed lines
     
     return pd.DataFrame(data)
+
+def load_multiple_files(filepaths):
+    """Load and combine multiple log files."""
+    all_data = []
+    
+    for filepath in filepaths:
+        print(f"Loading {filepath}...")
+        try:
+            df = load_log_file(filepath)
+            if not df.empty:
+                # Add source file column
+                df['source_file'] = os.path.basename(filepath)
+                all_data.append(df)
+                print(f"  Loaded {len(df)} records")
+            else:
+                print(f"  No valid records found")
+        except Exception as e:
+            print(f"  Error loading {filepath}: {e}")
+            continue
+    
+    if not all_data:
+        raise ValueError("No valid data found in any files")
+    
+    # Combine all dataframes
+    combined_df = pd.concat(all_data, ignore_index=True)
+    
+    # Sort by timestamp if available
+    if 'gps_timestamp' in combined_df.columns:
+        combined_df['timestamp'] = pd.to_datetime(combined_df['gps_timestamp'])
+        combined_df = combined_df.sort_values('timestamp')
+    
+    print(f"Combined {len(combined_df)} total records from {len(all_data)} files")
+    return combined_df
 
 def apply_lowpass_filter(data, sampling_rate=1.0, cutoff_freq=0.01, filter_order=8, pad_length=2000):
     """
@@ -96,22 +136,40 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
     """
     fig = go.Figure()
     
+    # Handle different column names (old vs new format)
+    if 'ppm_error' in df.columns:
+        ppm_col = 'ppm_error'
+    elif 'ppm_instantaneous' in df.columns:
+        ppm_col = 'ppm_instantaneous'
+    else:
+        raise ValueError("No PPM error column found in data")
+    
     # Convert PPM to PPB (1 ppm = 1000 ppb)
-    ppb_error = df['ppm_error'] * 1000
+    ppb_error = df[ppm_col] * 1000
+    
+    # Create x-axis (use timestamp if available, otherwise sample number)
+    if 'timestamp' in df.columns:
+        x_data = df['timestamp']
+        x_title = "Time"
+    else:
+        x_data = list(range(len(df)))
+        x_title = "Sample Number"
     
     # Add original data
     fig.add_trace(go.Scatter(
+        x=x_data,
         y=ppb_error, 
-        name="Original PPB Error", 
+        name="PPB Error", 
         mode='markers',
-        marker=dict(size=4, opacity=0.6),
-        line=dict(color='lightblue')
+        marker=dict(size=4, opacity=0.8),
+        line=dict(color='blue')
     ))
     
-    # Add filtered data if requested
-    if show_filtered:
+    # Add filtered data if requested and we have enough data
+    if show_filtered and len(ppb_error) > 10:
         ppb_error_filtered = apply_lowpass_filter(ppb_error, cutoff_freq=cutoff_freq)
         fig.add_trace(go.Scatter(
+            x=x_data,
             y=ppb_error_filtered, 
             name="Filtered PPB Error", 
             mode='lines',
@@ -122,32 +180,61 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
         ppb_mean = ppb_error.mean()
         ppb_error_normalized = ppb_error_filtered - ppb_mean
         fig.add_trace(go.Scatter(
+            x=x_data,
             y=ppb_error_normalized, 
             name="Normalized PPB Error", 
             mode='lines',
             line=dict(color='green', width=2)
         ))
     
-    # Calculate mean for title
+    # Calculate statistics
     ppb_mean = ppb_error.mean()
+    ppb_std = ppb_error.std()
     
     # Update layout with cleaner titles
     fig.update_layout(
-        title=f"Clock Source Stability Analysis (Mean: {ppb_mean:.2f} PPB)",
-        xaxis_title="Sample Number",
+        title=f"Clock Source Stability Analysis (Mean: {ppb_mean:.2f} PPB, Std: {ppb_std:.2f} PPB)",
+        xaxis_title=x_title,
         yaxis_title="Error (PPB)",
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=0.01
-        ),
+        showlegend=True,
         hovermode='x unified'
     )
     
     return fig
 
-df = load_json_log("log.txt")
-fig = plot_ppm_analysis(df, cutoff_freq=0.001)
-fig.show()
+def main():
+    parser = argparse.ArgumentParser(description='Plot frequency counter log files')
+    parser.add_argument('files', nargs='+', help='JSONL log files to plot')
+    parser.add_argument('--cutoff', type=float, default=0.001, help='Filter cutoff frequency (default: 0.001)')
+    parser.add_argument('--no-filter', action='store_true', help='Disable filtering')
+    parser.add_argument('--output', help='Save plot to HTML file instead of showing')
+    
+    args = parser.parse_args()
+    
+    # Load data from files
+    if len(args.files) == 1:
+        print(f"Loading single file: {args.files[0]}")
+        df = load_log_file(args.files[0])
+    else:
+        print(f"Loading {len(args.files)} files...")
+        df = load_multiple_files(args.files)
+    
+    if df.empty:
+        print("No valid data found!")
+        return
+    
+    print(f"Loaded {len(df)} total records")
+    
+    # Create plot
+    fig = plot_ppm_analysis(df, show_filtered=not args.no_filter, cutoff_freq=args.cutoff)
+    
+    # Show or save plot
+    if args.output:
+        fig.write_html(args.output)
+        print(f"Plot saved to {args.output}")
+    else:
+        fig.show()
+
+if __name__ == "__main__":
+    main()
 

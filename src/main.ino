@@ -17,7 +17,6 @@ struct PpsData {
   double avg_freq_hz;          // Running average frequency
   double ppm_instantaneous;    // Instantaneous PPM error
   double ppm_average;          // Average PPM error
-  uint32_t elapsed_sec;        // Sample count (seconds)
   bool has_data;
 };
 
@@ -77,6 +76,33 @@ String float_to_json_string(double value, int precision) {
   return String(value, precision);
 }
 
+void log_json_field(File& file, const char* name, const String& value, bool is_first = false) {
+  if (!is_first) file.print(",");
+  file.printf("\"%s\":%s", name, value.c_str());
+}
+
+void log_json_field(File& file, const char* name, const char* value, bool is_first = false) {
+  if (!is_first) file.print(",");
+  file.printf("\"%s\":\"%s\"", name, value);
+}
+
+void log_json_field(File& file, const char* name, uint32_t value, bool is_first = false) {
+  if (!is_first) file.print(",");
+  file.printf("\"%s\":%lu", name, value);
+}
+
+void log_json_field_if_valid(File& file, const char* name, double value, int precision) {
+  if (!isnan(value)) {
+    log_json_field(file, name, float_to_json_string(value, precision));
+  }
+}
+
+void log_json_field_if_valid(File& file, const char* name, uint32_t value) {
+  if (value != 0) {  // Assume 0 means invalid for uint32_t
+    log_json_field(file, name, value);
+  }
+}
+
 void onRmcUpdate(nmea::RmcData const rmc)
 {
     if (rmc.is_valid) {
@@ -123,37 +149,30 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	    // Calculate derived values
 	    double freq_hz = (double)g_pps_data.ticks;  // ticks = Hz for 1 second PPS
 	    
-		g_log_file.printf("{"
-				  "\"gps_timestamp\":\"%s\","
-				  "\"gps_source\":\"%s\","
-				  "\"gps_lat\":%s,"
-				  "\"gps_lon\":%s,"
-				  "\"gps_speed\":%s,"
-				  "\"gps_course\":%s,"
-				  "\"gps_magnetic_variation\":%s,"
-				  "\"ticks\":%lu,"
-				  "\"freq_hz\":%s,"
-				  "\"avg_freq_hz\":%s,"
-				  "\"ppm_instantaneous\":%s,"
-				  "\"ppm_average\":%s,"
-				  "\"oscillator_offset_ppm\":%s,"
-				  "\"elapsed_sec\":%lu"
-				  "}\n",
-				  g_gps_data.timestamp.c_str(),
-				  g_gps_data.source.c_str(),
-				  float_to_json_string(g_gps_data.latitude, 6).c_str(),
-				  float_to_json_string(g_gps_data.longitude, 6).c_str(),
-				  float_to_json_string(g_gps_data.speed, 4).c_str(),
-				  float_to_json_string(g_gps_data.course, 2).c_str(),
-				  float_to_json_string(g_gps_data.magnetic_variation, 4).c_str(),
-				  g_pps_data.ticks,
-				  float_to_json_string(freq_hz, 6).c_str(),
-				  float_to_json_string(g_pps_data.avg_freq_hz, 12).c_str(),
-				  float_to_json_string(g_pps_data.ppm_instantaneous, 6).c_str(),
-				  float_to_json_string(g_pps_data.ppm_average, 6).c_str(),
-				  float_to_json_string(g_frequency_offset_ppm, 6).c_str(),
-				  g_pps_data.elapsed_sec
-			);
+	    // Start JSON object
+	    g_log_file.print("{");
+	    
+	    // GPS timestamp and source (always present)
+	    log_json_field(g_log_file, "gps_timestamp", g_gps_data.timestamp.c_str(), true);
+	    log_json_field(g_log_file, "gps_source", g_gps_data.source.c_str());
+	    
+	    // GPS data (only if valid)
+	    log_json_field_if_valid(g_log_file, "gps_lat", g_gps_data.latitude, 6);
+	    log_json_field_if_valid(g_log_file, "gps_lon", g_gps_data.longitude, 6);
+	    log_json_field_if_valid(g_log_file, "gps_speed", g_gps_data.speed, 4);
+	    log_json_field_if_valid(g_log_file, "gps_course", g_gps_data.course, 2);
+	    log_json_field_if_valid(g_log_file, "gps_magnetic_variation", g_gps_data.magnetic_variation, 4);
+	    
+	    // Frequency data (only if valid)
+	    log_json_field_if_valid(g_log_file, "ticks", g_pps_data.ticks);
+	    log_json_field_if_valid(g_log_file, "freq_hz", freq_hz, 6);
+	    log_json_field_if_valid(g_log_file, "avg_freq_hz", g_pps_data.avg_freq_hz, 12);
+	    log_json_field_if_valid(g_log_file, "ppm_instantaneous", g_pps_data.ppm_instantaneous, 6);
+	    log_json_field_if_valid(g_log_file, "ppm_average", g_pps_data.ppm_average, 6);
+	    log_json_field_if_valid(g_log_file, "oscillator_offset_ppm", g_frequency_offset_ppm, 6);
+	    
+	    // End JSON object
+	    g_log_file.println("}");
 	    g_log_file.flush();
 	    
 	    // Reset frequency data flag after logging
@@ -228,6 +247,7 @@ void print_other_commands() {
   Serial.println("  l       - List all log files on SD card\r");
   Serial.println("  d<ID>   - Download log file to console by ID (e.g., d0)\r");
   Serial.println("  x<ID>   - Download log file via XMODEM protocol by ID (e.g., x0)\r");
+  Serial.println("  k       - Delete all log files except current one\r");
 }
 
 void print_help() {
@@ -243,7 +263,7 @@ void print_help() {
 }
 
 void wait_for_serial() {
-  int startup_delay = 5000;
+  int startup_delay = 200;
   while (startup_delay > 0) {
     Serial.printf("Waiting for serial...%d\r\n", startup_delay/1000);
     delay(1000);
@@ -591,6 +611,87 @@ void cmd_list_log_files() {
   list_log_files(g_current_log_file);
 }
 
+void cmd_delete_old_log_files() {
+  Serial.println("\r\n=== Delete Old Log Files ===\r");
+  
+  if (!g_sd_available) {
+    Serial.println("SD card not available.\r");
+    return;
+  }
+  
+  if (g_current_log_file.length() == 0) {
+    Serial.println("No current log file - nothing to preserve.\r");
+    return;
+  }
+  
+  Serial.printf("This will delete ALL log files except current: %s\r\n", g_current_log_file.c_str());
+  Serial.println("WARNING: This action cannot be undone!\r");
+  Serial.println("Type 'DELETE' to confirm or any other key to cancel:");
+  
+  // Wait for first confirmation
+  String confirmation1 = "";
+  unsigned long timeout = millis() + 15000; // 15 second timeout
+  
+  while (millis() < timeout && confirmation1.length() == 0) {
+    if (Serial.available()) {
+      confirmation1 = Serial.readStringUntil('\n');
+      confirmation1.trim();
+      break;
+    }
+    delay(100);
+  }
+  
+  if (confirmation1 != "DELETE") {
+    Serial.println("Delete operation cancelled.\r");
+    return;
+  }
+  
+  // Second confirmation
+  Serial.println("Are you absolutely sure? Type 'YES' to proceed:");
+  
+  String confirmation2 = "";
+  timeout = millis() + 10000; // 10 second timeout
+  
+  while (millis() < timeout && confirmation2.length() == 0) {
+    if (Serial.available()) {
+      confirmation2 = Serial.readStringUntil('\n');
+      confirmation2.trim();
+      break;
+    }
+    delay(100);
+  }
+  
+  if (confirmation2 != "YES") {
+    Serial.println("Delete operation cancelled.\r");
+    return;
+  }
+  
+  Serial.println("Proceeding with deletion...\r");
+  
+  // Close current log file temporarily to avoid issues
+  bool was_open = false;
+  if (g_log_file) {
+    g_log_file.flush();
+    g_log_file.close();
+    was_open = true;
+  }
+  
+  // Use FileManager to handle the deletion
+  uint32_t deleted_count = delete_old_log_files(g_current_log_file);
+  
+  Serial.printf("Operation complete: %lu files deleted\r\n", deleted_count);
+  
+  // Reopen current log file if it was open
+  if (was_open && g_current_log_file.length() > 0) {
+    g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
+    if (g_log_file) {
+      Serial.printf("Reopened current log file: %s\r\n", g_current_log_file.c_str());
+    } else {
+      Serial.printf("Warning: Failed to reopen current log file: %s\r\n", g_current_log_file.c_str());
+    }
+  }
+}
+
 void cmd_download_log_file(String command) {
   Serial.println("\r\n=== Download Log File ===\r");
   Serial.println("Pausing periodic updates...\r");
@@ -728,7 +829,7 @@ bool xmodem_send_file(File& file, Stream& serial) {
       serial.flush();
       
       // Wait for ACK/NAK
-      timeout = millis() + 3000;
+      timeout = millis() + 1000;
       while (millis() < timeout) {
         if (serial.available()) {
           uint8_t response = serial.read();
@@ -741,7 +842,7 @@ bool xmodem_send_file(File& file, Stream& serial) {
             return false;
           }
         }
-        delay(10);
+        delay(1); 
       }
     }
     
@@ -762,7 +863,7 @@ bool xmodem_send_file(File& file, Stream& serial) {
         if (response == CAN) return false;
         break; // Retry on NAK or other
       }
-      delay(10);
+      delay(1);  // Reduced from 10ms to 1ms
     }
   }
   
@@ -928,6 +1029,7 @@ void process_single_command(char cmd) {
     case 'h': print_help(); break;
     case 'b': cmd_reboot_to_bootloader(); break;
     case 'l': cmd_list_log_files(); break;
+    case 'k': cmd_delete_old_log_files(); break;
     case 'v': 
       g_verbose_timing = !g_verbose_timing;
       Serial.printf("Verbose timing: %s\r\n", g_verbose_timing ? "ON" : "OFF");
@@ -982,7 +1084,6 @@ void process_frequency_measurement() {
   // Store frequency measurement data in PPS struct
   g_pps_data.ticks = ticks;  // ticks = freq_hz for 1 second PPS
   g_pps_data.avg_freq_hz = (g_sample_count == 0) ? 0.0 : (g_sum_hz / (double)g_sample_count);
-  g_pps_data.elapsed_sec = g_sample_count;
   g_pps_data.ppm_instantaneous = ((freq_hz - ref_hz) / ref_hz) * 1e6;
   g_pps_data.ppm_average = ((g_pps_data.avg_freq_hz - ref_hz) / ref_hz) * 1e6;
   g_pps_data.has_data = true;
@@ -993,7 +1094,7 @@ void process_frequency_measurement() {
     double freq_mhz = g_pps_data.ticks / 1e6;  // Calculate MHz from ticks
     double avg_freq_mhz = g_pps_data.avg_freq_hz / 1e6;  // Calculate avg MHz
     Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppm(lat)=%.3f ppm(avg)=%.6f\r\n",
-                  (unsigned long)g_pps_data.elapsed_sec, g_pps_data.ticks, freq_mhz, 
+                  (unsigned long)g_sample_count, g_pps_data.ticks, freq_mhz, 
                   avg_freq_mhz, g_pps_data.ppm_instantaneous, g_pps_data.ppm_average);
   }
 }
