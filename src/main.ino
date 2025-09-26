@@ -225,8 +225,7 @@ void print_mode_commands() {
 
 void print_output_commands() {
   Serial.println("Output Generation (Always Active):\r");
-  Serial.println("  f<freq> - Set output frequency in Hz (e.g., f10 for 10 Hz)\r");
-  Serial.println("  f1      - Generate 1 PPS (default)\r");
+  Serial.println("  f       - Re-arm GPT-driven 1 PPS output\r");
   Serial.println("  g0/g1   - Force PPS output low/high via GPIO\r");
 }
 
@@ -431,17 +430,13 @@ void cmd_set_capture_edge() {
 }
 
 void cmd_set_output_frequency(const String& command) {
-  uint32_t freq = command.substring(1).toInt();
-  if (freq > 0 && freq <= 1000000) {
-    if (pps_release_to_gpt()) {
-      Serial.println("Resumed GPT2 control of PPS output.\r");
-    }
-    gpt2_set_output_frequency(freq);
-    Serial.printf("Output frequency set to %lu Hz\r\n", freq);
-    Serial.printf("Signal available on pin %d\r\n", GPT2_COMPARE_PIN);
-  } else {
-    Serial.println("Error: Frequency must be between 1 and 1000000 Hz\r");
+  (void)command;
+  if (pps_release_to_gpt()) {
+    Serial.println("Resumed GPT2 control of PPS output.\r");
   }
+  gpt2_begin_dual_mode(1, GPT_EDGE_RISING, true);
+  Serial.println("Output frequency set to 1 Hz\r");
+  Serial.printf("Signal available on pin %d\r\n", GPT2_COMPARE_PIN);
 }
 
 void cmd_set_frequency_offset(const String& command) {
@@ -477,7 +472,7 @@ void show_gpt2_status() {
   } else {
     Serial.println("No GPS PPS signals received yet\r");
   }
-  Serial.printf("Output frequency: %lu Hz on pin %d\r\n", gpt2_get_output_frequency(), GPT2_COMPARE_PIN);
+  Serial.printf("Output frequency: 1 Hz on pin %d\r\n", GPT2_COMPARE_PIN);
   Serial.printf("GPS PPS input: pin %d\r\n", GPT2_CAPTURE_PIN);
   Serial.printf("GPT2 Counter: %lu\r\n", GPT2_CNT);
   Serial.printf("GPT2 Control: 0x%08lX\r\n", GPT2_CR);
@@ -1057,7 +1052,13 @@ void process_parameter_command(String command) {
   char cmd = command.charAt(0);
 
   switch (cmd) {
-    case 'f': cmd_set_output_frequency(command); break;
+    case 'f':
+      if (command.length() > 1) {
+        Serial.println("Usage: f\r");
+        break;
+      }
+      cmd_set_output_frequency(command);
+      break;
     case 'p': cmd_set_oscillator_ppm(command); break;
     case 'd': cmd_download_log_file(command); break;
     case 'x': cmd_xmodem_transfer(command); break;

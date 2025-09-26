@@ -8,11 +8,11 @@ static volatile bool capture_available = false;
 
 // System state
 static volatile bool gpt2_running = false;
-static volatile uint32_t current_output_freq = 1;
+static uint32_t compare_target_ticks = 10000000;
+static bool compare_high = true;
 
 void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, bool use_external_clock) {
-  current_output_freq = output_freq_hz;
-  
+  (void)output_freq_hz;  // Fixed 1 PPS output
   // Configure clock source
   if (use_external_clock) {
     // Use external clock input on pin 14
@@ -70,12 +70,14 @@ void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, 
   GPT2_CR &= ~(((uint32_t)3 << 16) | ((uint32_t)3 << 18));
   GPT2_CR |= ((uint32_t)(capture_edge & 0x3) << 16);
 
-  // Configure output compare for toggle mode
-  GPT2_CR &= ~(0x3 << 4);  // Clear OM1 bits
-  GPT2_CR |= (0x1 << 4);   // Set OM1 = 01 (toggle)
+  // Configure output compare actions
+  GPT2_CR &= ~GPT_CR_OM1(0x7);
+  GPT2_CR |= GPT_CR_OM1(0x3);  // Set output high on compare
 
-  // Set output frequency
-  gpt2_set_output_frequency(output_freq_hz);
+  // Initialize compare schedule
+  compare_target_ticks = 10000000;
+  compare_high = true;
+  GPT2_OCR1 = compare_target_ticks;
 
   // Clear status flags
   GPT2_SR = 0x3F;
@@ -84,16 +86,6 @@ void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, 
   // Start the timer
   GPT2_CR |= GPT_CR_EN;
   gpt2_running = true;
-}
-
-void gpt2_set_output_frequency(uint32_t frequency_hz) {
-  if (frequency_hz == 0) frequency_hz = 1;
-  current_output_freq = frequency_hz;
-
-  // Calculate compare period for 10 MHz timebase
-  // For toggle mode, we need half the period since each compare match toggles
-  uint32_t compare_period = 10000000 / (2 * frequency_hz);
-  GPT2_OCR1 = compare_period;
 }
 
 void gpt2_set_capture_edge(GptCaptureEdge edge) {
@@ -112,6 +104,15 @@ uint32_t gpt2_read_capture() {
   return period_ticks;
 }
 
+void gpt2_set_compare_target(uint32_t ticks) {
+  compare_target_ticks = ticks;
+  GPT2_OCR1 = compare_target_ticks;
+}
+
+uint32_t gpt2_get_last_capture() {
+  return last_cap;
+}
+
 void gpt2_poll_capture() {
   uint32_t sr = GPT2_SR;
   if (sr & GPT_SR_IF1) {
@@ -120,6 +121,16 @@ void gpt2_poll_capture() {
     prev_cap = last_cap;
     last_cap = cap;
     capture_available = (prev_cap != 0);
+  }
+  if (sr & GPT_SR_OF1) {
+    GPT2_SR = GPT_SR_OF1;  // clear compare flag
+
+    // Toggle action and schedule next target
+    compare_high = !compare_high;
+    uint32_t action_bits = compare_high ? 0x3 : 0x2; // set or clear output
+    compare_target_ticks += 5000000;
+    GPT2_CR = (GPT2_CR & ~GPT_CR_OM1(0x7)) | GPT_CR_OM1(action_bits);
+    GPT2_OCR1 = compare_target_ticks;
   }
 }
 
@@ -130,8 +141,4 @@ void gpt2_stop() {
 
 bool gpt2_is_running() {
   return gpt2_running;
-}
-
-uint32_t gpt2_get_output_frequency() {
-  return current_output_freq;
 }

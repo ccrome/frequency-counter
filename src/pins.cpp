@@ -19,6 +19,9 @@ void pps_force_gpio(bool high) {
 
     if (first_override) {
         s_pps_override_active = true;
+        // Switch pad to GPIO function
+        IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_05 = 5;  // ALT5 = GPIO1_IO21
+        IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B1_05 = 0x1030;
         pinMode(GPT2_COMPARE_PIN, OUTPUT);
     }
 
