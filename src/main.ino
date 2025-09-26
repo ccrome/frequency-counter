@@ -227,6 +227,7 @@ void print_output_commands() {
   Serial.println("Output Generation (Always Active):\r");
   Serial.println("  f<freq> - Set output frequency in Hz (e.g., f10 for 10 Hz)\r");
   Serial.println("  f1      - Generate 1 PPS (default)\r");
+  Serial.println("  g0/g1   - Force PPS output low/high via GPIO\r");
 }
 
 void print_oscillator_commands() {
@@ -432,6 +433,9 @@ void cmd_set_capture_edge() {
 void cmd_set_output_frequency(const String& command) {
   uint32_t freq = command.substring(1).toInt();
   if (freq > 0 && freq <= 1000000) {
+    if (pps_release_to_gpt()) {
+      Serial.println("Resumed GPT2 control of PPS output.\r");
+    }
     gpt2_set_output_frequency(freq);
     Serial.printf("Output frequency set to %lu Hz\r\n", freq);
     Serial.printf("Signal available on pin %d\r\n", GPT2_COMPARE_PIN);
@@ -478,6 +482,9 @@ void show_gpt2_status() {
   Serial.printf("GPT2 Counter: %lu\r\n", GPT2_CNT);
   Serial.printf("GPT2 Control: 0x%08lX\r\n", GPT2_CR);
   Serial.printf("Compare Register: %lu\r\n", GPT2_OCR1);
+  if (pps_gpio_override_active()) {
+    Serial.printf("PPS override: GPIO driving %s\r\n", pps_gpio_state_high() ? "HIGH" : "LOW");
+  }
 }
 
 void show_oscillator_status() {
@@ -988,7 +995,7 @@ void handle_serial_commands() {
       Serial.print(c);
 
         // Check if this is a parameter command that needs more input
-        if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'o') {
+      if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'o' || c == 'g') {
           command_buffer = String(c);
           reading_parameter_command = true;
           continue;
@@ -997,7 +1004,7 @@ void handle_serial_commands() {
       // Process single-character commands immediately
       process_single_command(c);
       } else {
-      // Reading parameter for f or p commands
+      // Reading parameter for commands that require arguments
       if (c == '\n' || c == '\r') {
         // Echo newline
         Serial.println();
@@ -1055,6 +1062,24 @@ void process_parameter_command(String command) {
     case 'd': cmd_download_log_file(command); break;
     case 'x': cmd_xmodem_transfer(command); break;
     case 'o': cmd_set_frequency_offset(command); break;
+    case 'g':
+      if (command.length() == 2) {
+        char arg = command.charAt(1);
+        if (arg == '0') {
+          pps_force_gpio(false);
+          Serial.printf("PPS output forced LOW via GPIO on pin %d\r\n", GPT2_COMPARE_PIN);
+          Serial.println("Use any f<freq> command to resume GPT control.\r");
+        } else if (arg == '1') {
+          pps_force_gpio(true);
+          Serial.printf("PPS output forced HIGH via GPIO on pin %d\r\n", GPT2_COMPARE_PIN);
+          Serial.println("Use any f<freq> command to resume GPT control.\r");
+        } else {
+          Serial.println("Usage: g0 (low) or g1 (high)\r");
+        }
+      } else {
+        Serial.println("Usage: g0 (low) or g1 (high)\r");
+      }
+      break;
     default:
       Serial.println("Unknown parameter command.\r");
       break;

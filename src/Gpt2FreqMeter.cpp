@@ -89,7 +89,7 @@ void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, 
 void gpt2_set_output_frequency(uint32_t frequency_hz) {
   if (frequency_hz == 0) frequency_hz = 1;
   current_output_freq = frequency_hz;
-  
+
   // Calculate compare period for 10 MHz timebase
   // For toggle mode, we need half the period since each compare match toggles
   uint32_t compare_period = 10000000 / (2 * frequency_hz);

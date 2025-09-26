@@ -10,3 +10,7 @@
 #define GPT2_COMPARE_PIN 41   // Output compare pin (GPIO_AD_B1_05)
 
 extern void setup_pins(void);
+void pps_force_gpio(bool high);
+bool pps_release_to_gpt();
+bool pps_gpio_override_active();
+bool pps_gpio_state_high();
