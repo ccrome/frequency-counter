@@ -9,18 +9,43 @@ void onRmcUpdate(nmea::RmcData const rmc);
 
 SiT5501 oscillator(0x60);
 ArduinoNmeaParser parser(onRmcUpdate, nullptr);
+// PPS/Frequency measurement data structure
+struct PpsData {
+  uint32_t ticks;              // Also represents freq_hz (ticks = Hz for 1 second PPS)
+  double avg_freq_hz;          // Running average frequency
+  double ppm_instantaneous;    // Instantaneous PPM error
+  double ppm_average;          // Average PPM error
+  uint32_t elapsed_sec;        // Sample count (seconds)
+  bool has_data;
+};
+
+// GPS data structure
+struct GpsData {
+  String timestamp;
+  String source;
+  double latitude;
+  double longitude;
+  double speed;
+  double course;
+  double magnetic_variation;
+  bool is_valid;
+};
+
 // Global variables for frequency measurement
 static double g_sum_hz = 0.0;
 static uint32_t g_sample_count = 0;
+
+// Data structures
+static PpsData g_pps_data = {0};
+static GpsData g_gps_data = {0};
+
 
 // SD card logging
 static bool g_sd_available = false;
 static bool g_pause_updates = false;
 static bool g_verbose_timing = false;  // Start with verbose timing off
 static String g_current_log_file = "";
-static String g_nmea_log_file = "";
 static File g_log_file;
-static File g_nmea_file;
 
 
 const char* rmc_source_map[] = {
@@ -43,23 +68,77 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	int rmc_source_i = static_cast<int>(nmea::RmcSource::GPS);
 	const char *rmc_source_s = rmc_source_map[rmc_source_i];
 
-	
-	g_nmea_file.printf("{"
-		      "\"timestamp\":\"%4d-%02d-%02dT%2d:%2d:%2dZ\","
-		      "\"source\":\"%s\","
-		      "\"latlon\":[%s, %s],"
-		      "\"speed\":%s,"
-		      "\"course\":%s,"
-		      "\"magnetic_variation\":%.4f}\n",
-		      rmc.date.year, rmc.date.month, rmc.date.day,
-		      rmc.time_utc.hour, rmc.time_utc.minute, rmc.time_utc.second,
-		      rmc_source_s,
-		      float_to_json_string(rmc.latitude, 6).c_str(),
-		      float_to_json_string(rmc.longitude, 6).c_str(),
-		      float_to_json_string(rmc.speed, 4).c_str(),
-		      float_to_json_string(rmc.course, 2).c_str(),
-		      float_to_json_string(rmc.magnetic_variation, 2).c_str()
+	// Store GPS data in struct
+	g_gps_data.timestamp = String(rmc.date.year) + "-" + 
+	                      String(rmc.date.month < 10 ? "0" : "") + String(rmc.date.month) + "-" + 
+	                      String(rmc.date.day < 10 ? "0" : "") + String(rmc.date.day) + "T" +
+	                      String(rmc.time_utc.hour < 10 ? "0" : "") + String(rmc.time_utc.hour) + ":" +
+	                      String(rmc.time_utc.minute < 10 ? "0" : "") + String(rmc.time_utc.minute) + ":" +
+	                      String(rmc.time_utc.second < 10 ? "0" : "") + String(rmc.time_utc.second) + "Z";
+	g_gps_data.source = String(rmc_source_s);
+	g_gps_data.latitude = rmc.latitude;
+	g_gps_data.longitude = rmc.longitude;
+	g_gps_data.speed = rmc.speed;
+	g_gps_data.course = rmc.course;
+	g_gps_data.magnetic_variation = rmc.magnetic_variation;
+	g_gps_data.is_valid = true;
+
+	// Create log file on first GPS message using GPS timestamp
+	if (!g_log_file && g_sd_available) {
+	    // Create filename from GPS timestamp (replace : with - for filesystem compatibility)
+	    String filename = g_gps_data.timestamp;
+	    filename.replace(":", "-");
+	    filename += ".jsonl";
+	    
+	    g_current_log_file = filename;
+	    g_log_file = SD.open(filename.c_str(), FILE_WRITE);
+	    
+	    if (g_log_file) {
+	        Serial.printf("Created GPS-timestamped log file: %s\r\n", filename.c_str());
+	    } else {
+	        Serial.printf("Failed to create log file: %s\r\n", filename.c_str());
+	    }
+	}
+
+	// Create combined log entry with both frequency and GPS data
+	if (g_pps_data.has_data && g_log_file) {
+	    // Calculate derived values
+	    double freq_hz = (double)g_pps_data.ticks;  // ticks = Hz for 1 second PPS
+	    
+	    g_log_file.printf("{"
+		      "\"gps_timestamp\":\"%s\","
+		      "\"gps_source\":\"%s\","
+		      "\"gps_lat\":%s,"
+		      "\"gps_lon\":%s,"
+		      "\"gps_speed\":%s,"
+		      "\"gps_course\":%s,"
+		      "\"gps_magnetic_variation\":%s,"
+		      "\"ticks\":%lu,"
+		      "\"freq_hz\":%s,"
+		      "\"avg_freq_hz\":%s,"
+		      "\"ppm_instantaneous\":%s,"
+		      "\"ppm_average\":%s,"
+		      "\"elapsed_sec\":%lu"
+		      "}\n",
+		      g_gps_data.timestamp.c_str(),
+		      g_gps_data.source.c_str(),
+		      float_to_json_string(g_gps_data.latitude, 6).c_str(),
+		      float_to_json_string(g_gps_data.longitude, 6).c_str(),
+		      float_to_json_string(g_gps_data.speed, 4).c_str(),
+		      float_to_json_string(g_gps_data.course, 2).c_str(),
+		      float_to_json_string(g_gps_data.magnetic_variation, 4).c_str(),
+		      g_pps_data.ticks,
+		      float_to_json_string(freq_hz, 6).c_str(),
+		      float_to_json_string(g_pps_data.avg_freq_hz, 12).c_str(),
+		      float_to_json_string(g_pps_data.ppm_instantaneous, 6).c_str(),
+		      float_to_json_string(g_pps_data.ppm_average, 6).c_str(),
+		      g_pps_data.elapsed_sec
 	    );
+	    g_log_file.flush();
+	    
+	    // Reset frequency data flag after logging
+	    g_pps_data.has_data = false;
+	}
     }
 }
 
@@ -68,7 +147,7 @@ void check_gpt2_counter() {
   uint32_t count1 = GPT2_CNT;
   delay(10);
   uint32_t count2 = GPT2_CNT;
-
+  
   if (count2 > count1) {
     Serial.printf("GPT2 counter is running: %lu -> %lu (diff: %lu)\r\n", 
                   (unsigned long)count1, (unsigned long)count2, (unsigned long)(count2 - count1));
@@ -83,9 +162,9 @@ void check_gpt2_counter() {
 
 void increase_peripheral_clock() {
   Serial.println("=== INCREASING PERIPHERAL CLOCK FOR 10MHz EXTERNAL CLOCK ===\r");
-
+  
   Serial.printf("Current CCM_CSCMR1 = 0x%08lX\r\n", (unsigned long)CCM_CSCMR1);
-
+  
   uint32_t cscmr1 = CCM_CSCMR1;
   cscmr1 &= ~CCM_CSCMR1_PERCLK_CLK_SEL;
   cscmr1 &= ~(0x3F << 0);
@@ -203,29 +282,8 @@ bool initialize_sd_card() {
   if (SD.begin(BUILTIN_SDCARD)) {
     g_sd_available = true;
     Serial.println("SD card initialized successfully\r");
-
-    // Create new log file with timestamp
-    char filename[32];
-    uint32_t file_num = 0;
-
-    // Find next available filename
-    do {
-      snprintf(filename, sizeof(filename), "freq_%04lu.jsonl", file_num++);
-    } while (SD.exists(filename) && file_num < 10000);
-
-    g_current_log_file = String(filename);
-    g_nmea_log_file = g_current_log_file + ".nmea";
-    g_log_file = SD.open(filename, FILE_WRITE);
-    g_nmea_file = SD.open(g_nmea_log_file.c_str(), FILE_WRITE);
-    Serial.printf("Just opened %s as %d\r\n", g_nmea_log_file.c_str(), g_nmea_file);
-    if (g_log_file) {
-      Serial.printf("Created log file: %s (JSON Lines format)\r\n", filename);
-      return true;
-    } else {
-      Serial.printf("Failed to create log file: %s\r\n", filename);
-      g_sd_available = false;
-      return false;
-    }
+    Serial.println("Log file will be created when first GPS message is received\r");
+    return true;
   } else {
     Serial.println("SD card initialization failed\r");
     g_sd_available = false;
@@ -233,21 +291,6 @@ bool initialize_sd_card() {
   }
 }
 
-void log_measurement_to_sd(uint32_t ticks, double freq_hz, double ppm_error, double ppm_avg) {
-  if (!g_sd_available || !g_log_file) return;
-
-  // Write measurement as JSON line
-  g_log_file.printf("{\"timestamp_ms\":%lu,\"ticks\":%lu,\"freq_hz\":%.6f,\"freq_mhz\":%.6f,\"ppm_error\":%.6f,\"ppm_avg\":%.6f}\n",
-                    millis(),
-                    ticks,
-                    freq_hz,
-                    freq_hz / 1e6,
-                    ppm_error,
-                    ppm_avg);
-
-  // Flush after each entry to ensure immediate write
-  g_log_file.flush();
-}
 
 void cmd_reset_measurements() {
   reset_measurement_stats();
@@ -697,12 +740,14 @@ void process_frequency_measurement() {
   gpt2_poll_capture();
   if (!gpt2_capture_available()) return;
 
-  uint32_t ticks = gpt2_read_capture();
-  double freq_hz = (double)ticks;
+  // Only process once per PPS pulse - read capture and immediately process
+  uint32_t ticks = gpt2_read_capture();  // This resets capture_available to false
+  double freq_hz = (double)ticks;  // Ticks = frequency in Hz (since PPS = 1 second)
   const double ref_hz = 10000000.0;  // 10 MHz reference
 
-    if (freq_hz < ref_hz * 0.95 || freq_hz > ref_hz * 1.05) {
-    Serial.printf("WARNING: GPS PPS freq = %.6f Hz is outside 95-105%% of ref_hz = %.6f Hz\r\n", 
+
+  if (freq_hz < ref_hz * 0.99 || freq_hz > ref_hz * 1.01) {
+    Serial.printf("WARNING: Measured freq = %.6f Hz is outside 99-101%% of ref_hz = %.6f Hz\r\n", 
                   freq_hz, ref_hz);
     return;
   }
@@ -710,30 +755,25 @@ void process_frequency_measurement() {
   g_sum_hz += freq_hz;
   g_sample_count++;
 
-  display_frequency_results(ticks, ref_hz);
-}
+  // Store frequency measurement data in PPS struct
+  g_pps_data.ticks = ticks;  // ticks = freq_hz for 1 second PPS
+  g_pps_data.avg_freq_hz = (g_sample_count == 0) ? 0.0 : (g_sum_hz / (double)g_sample_count);
+  g_pps_data.elapsed_sec = g_sample_count;
+  g_pps_data.ppm_instantaneous = ((freq_hz - ref_hz) / ref_hz) * 1e6;
+  g_pps_data.ppm_average = ((g_pps_data.avg_freq_hz - ref_hz) / ref_hz) * 1e6;
+  g_pps_data.has_data = true;
+  
 
-void display_frequency_results(uint32_t ticks, double ref_hz) {
-    double freq_hz = (double)ticks;
-
-  double avg_hz = (g_sample_count == 0) ? 0.0 : (g_sum_hz / (double)g_sample_count);
-  uint32_t elapsed_sec = g_sample_count;
-
-      double ppm_inst = ((freq_hz - ref_hz) / ref_hz) * 1e6;
-  double ppm_avg = ((avg_hz - ref_hz) / ref_hz) * 1e6;
-
-      double mhz_latest = freq_hz / 1e6;
-  double mhz_avg = avg_hz / 1e6;
-
-  // Only display if not paused and verbose timing is enabled
+  // Display results if verbose timing is enabled
   if (!g_pause_updates && g_verbose_timing) {
+    double freq_mhz = g_pps_data.ticks / 1e6;  // Calculate MHz from ticks
+    double avg_freq_mhz = g_pps_data.avg_freq_hz / 1e6;  // Calculate avg MHz
     Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppm(lat)=%.3f ppm(avg)=%.6f\r\n",
-                  (unsigned long)elapsed_sec, ticks, mhz_latest, mhz_avg, ppm_inst, ppm_avg);
+                  (unsigned long)g_pps_data.elapsed_sec, g_pps_data.ticks, freq_mhz, 
+                  avg_freq_mhz, g_pps_data.ppm_instantaneous, g_pps_data.ppm_average);
   }
-
-  // Always log to SD card regardless of pause state
-  log_measurement_to_sd(ticks, freq_hz, ppm_inst, ppm_avg);
 }
+
 
 void print_oscillator_status() {
   if (oscillator.isPresent()) {
@@ -755,7 +795,6 @@ void process_nmea_messages(void) {
     while (Serial1.available()) {
 	parser.encode((char)Serial1.read());
     }
-    g_nmea_file.flush();
 }
 
 void loop() {
