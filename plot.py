@@ -122,6 +122,83 @@ def apply_lowpass_filter(data, sampling_rate=1.0, cutoff_freq=0.01, filter_order
     
     return filtered_data
 
+def plot_gps_map(df):
+    """
+    Create a map showing GPS coordinates and mean position.
+    
+    Args:
+        df (pandas.DataFrame): DataFrame containing GPS data
+    
+    Returns:
+        plotly.graph_objects.Figure: The created map figure
+    """
+    # Check if we have GPS data
+    if 'gps_lat' not in df.columns or 'gps_lon' not in df.columns:
+        return None
+    
+    # Filter out NaN values
+    gps_data = df.dropna(subset=['gps_lat', 'gps_lon'])
+    
+    if len(gps_data) == 0:
+        return None
+    
+    # Calculate mean position
+    mean_lat = gps_data['gps_lat'].mean()
+    mean_lon = gps_data['gps_lon'].mean()
+    
+    # Create map figure
+    fig = go.Figure()
+    
+    # Add individual GPS points
+    fig.add_trace(go.Scattermapbox(
+        lat=gps_data['gps_lat'],
+        lon=gps_data['gps_lon'],
+        mode='markers',
+        marker=dict(
+            size=8,
+            color='blue',
+            opacity=0.6
+        ),
+        name='GPS Points',
+        text=[f"Point {i+1}" for i in range(len(gps_data))],
+        hovertemplate="<b>GPS Point %{text}</b><br>" +
+                     "Lat: %{lat:.6f}<br>" +
+                     "Lon: %{lon:.6f}<br>" +
+                     "<extra></extra>"
+    ))
+    
+    # Add mean position
+    fig.add_trace(go.Scattermapbox(
+        lat=[mean_lat],
+        lon=[mean_lon],
+        mode='markers',
+        marker=dict(
+            size=15,
+            color='red',
+            symbol='star'
+        ),
+        name='Mean Position',
+        text=['Mean'],
+        hovertemplate="<b>Mean Position</b><br>" +
+                     "Lat: %{lat:.6f}<br>" +
+                     "Lon: %{lon:.6f}<br>" +
+                     "<extra></extra>"
+    ))
+    
+    # Update layout for mapbox
+    fig.update_layout(
+        mapbox=dict(
+            style="open-street-map",
+            center=dict(lat=mean_lat, lon=mean_lon),
+            zoom=15
+        ),
+        title=f"GPS Track (Mean: {mean_lat:.6f}, {mean_lon:.6f})",
+        showlegend=True,
+        height=600
+    )
+    
+    return fig
+
 def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
     """
     Create a plot showing frequency error analysis with optional filtering in PPB.
@@ -208,6 +285,8 @@ def main():
     parser.add_argument('--cutoff', type=float, default=0.001, help='Filter cutoff frequency (default: 0.001)')
     parser.add_argument('--no-filter', action='store_true', help='Disable filtering')
     parser.add_argument('--output', help='Save plot to HTML file instead of showing')
+    parser.add_argument('--map-only', action='store_true', help='Show only GPS map')
+    parser.add_argument('--no-map', action='store_true', help='Disable GPS map')
     
     args = parser.parse_args()
     
@@ -225,15 +304,86 @@ def main():
     
     print(f"Loaded {len(df)} total records")
     
-    # Create plot
-    fig = plot_ppm_analysis(df, show_filtered=not args.no_filter, cutoff_freq=args.cutoff)
-    
-    # Show or save plot
-    if args.output:
-        fig.write_html(args.output)
-        print(f"Plot saved to {args.output}")
+    # Create plots
+    if args.map_only:
+        # Only show GPS map
+        map_fig = plot_gps_map(df)
+        if map_fig:
+            if args.output:
+                map_fig.write_html(args.output)
+                print(f"GPS map saved to {args.output}")
+            else:
+                map_fig.show()
+        else:
+            print("No GPS data found for mapping")
     else:
-        fig.show()
+        # Create frequency analysis plot
+        freq_fig = plot_ppm_analysis(df, show_filtered=not args.no_filter, cutoff_freq=args.cutoff)
+        
+        # Create GPS map if requested and available
+        map_fig = None
+        if not args.no_map:
+            map_fig = plot_gps_map(df)
+        
+        # Always save to files, never show interactively
+        if args.output:
+            base_name = args.output.replace('.html', '')
+            freq_file = f"{base_name}_frequency.html"
+            map_file = f"{base_name}_map.html"
+            
+            # Save individual plots
+            freq_fig.write_html(freq_file)
+            print(f"Frequency plot saved to {freq_file}")
+            
+            if map_fig:
+                map_fig.write_html(map_file)
+                print(f"Map plot saved to {map_file}")
+                
+                # Create simple combined HTML with iframes
+                combined_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frequency Counter Analysis</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .plot-section {{ margin: 20px 0; }}
+        h2 {{ color: #333; border-bottom: 2px solid #ddd; padding-bottom: 10px; }}
+        iframe {{ width: 100%; height: 600px; border: none; }}
+    </style>
+</head>
+<body>
+    <h1>Frequency Counter Analysis</h1>
+    
+    <div class="plot-section">
+        <h2>Frequency Stability Analysis</h2>
+        <iframe src="{freq_file}"></iframe>
+    </div>
+    
+    <div class="plot-section">
+        <h2>GPS Track</h2>
+        <iframe src="{map_file}"></iframe>
+    </div>
+</body>
+</html>
+"""
+                
+                with open(args.output, 'w') as f:
+                    f.write(combined_html)
+                print(f"Combined view saved to {args.output}")
+            else:
+                # Just rename the frequency file to the output name
+                import shutil
+                shutil.move(freq_file, args.output)
+                print(f"Frequency plot saved to {args.output}")
+        else:
+            # Default filenames when no output specified
+            freq_fig.write_html("frequency_analysis.html")
+            print("Frequency plot saved to frequency_analysis.html")
+            
+            if map_fig:
+                map_fig.write_html("gps_map.html")
+                print("GPS map saved to gps_map.html")
 
 if __name__ == "__main__":
     main()
