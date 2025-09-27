@@ -5,6 +5,7 @@
 #include "Gpt2FreqMeter.h"
 #include "pins.h"
 #include "SiT5501.h"
+#include "display.h"
 #include <ArduinoNmeaParser.h>
 #include "FileManager.h"
 void onRmcUpdate(nmea::RmcData const rmc);
@@ -47,6 +48,7 @@ static bool g_pause_updates = false;
 static bool g_verbose_timing = false;  // Start with verbose timing off
 static String g_current_log_file = "";
 static File g_log_file;
+static uint32_t g_last_pps_millis = 0;
 
 
 // Persistent frequency offset (stored in EEPROM)
@@ -259,6 +261,7 @@ void print_help() {
   print_oscillator_commands();
   Serial.println("\r");
   print_other_commands();
+  Serial.printf("\rDisplay: %s\r\n", display_available() ? "OLED detected" : "(none)");
   Serial.println("\r");
 }
 
@@ -306,6 +309,11 @@ void setup() {
   initialize_sd_card();
   initialize_gpt2();
   initialize_oscillator();
+  if (display_init()) {
+    Serial.println("OLED display initialized successfully\r");
+  } else {
+    Serial.println("OLED display unavailable, continuing without it\r");
+  }
   load_frequency_offset();  // Load persistent frequency offset
 
   print_help();
@@ -1106,6 +1114,7 @@ void process_frequency_measurement() {
 
   g_sum_hz += freq_hz;
   g_sample_count++;
+  g_last_pps_millis = millis();
 
   // Store frequency measurement data in PPS struct
   g_pps_data.ticks = ticks;  // ticks = freq_hz for 1 second PPS
@@ -1154,4 +1163,28 @@ void loop() {
   // Always process GPS PPS measurements (if available)
   process_frequency_measurement();
   process_nmea_messages();
+
+  DisplayStatus status;
+  bool pps_recent = (g_last_pps_millis != 0) && (millis() - g_last_pps_millis <= 10000);
+  status.pps_locked = pps_recent;
+  status.sample_count = g_sample_count;
+  status.ppm_error = g_pps_data.ppm_instantaneous;
+  status.ppm_average = g_pps_data.ppm_average;
+  status.utc_valid = g_gps_data.is_valid;
+  if (status.utc_valid) {
+    int year, month, day, hour, minute, second;
+    if (sscanf(g_gps_data.timestamp.c_str(), "%d-%d-%dT%d:%d:%dZ",
+               &year, &month, &day, &hour, &minute, &second) == 6) {
+      status.utc.year = (uint16_t)year;
+      status.utc.month = (uint8_t)month;
+      status.utc.day = (uint8_t)day;
+      status.utc.hour = (uint8_t)hour;
+      status.utc.minute = (uint8_t)minute;
+      status.utc.second = (uint8_t)second;
+    } else {
+      status.utc_valid = false;
+    }
+  }
+  status.output_high = gpt2_is_output_high();
+  display_update(status);
 }

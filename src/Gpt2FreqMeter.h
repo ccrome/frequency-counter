@@ -23,3 +23,4 @@ void gpt2_poll_capture();
 // System Control
 void gpt2_stop();
 bool gpt2_is_running();
+bool gpt2_is_output_high();

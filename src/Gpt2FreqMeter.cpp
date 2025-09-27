@@ -10,6 +10,7 @@ static volatile bool capture_available = false;
 static volatile bool gpt2_running = false;
 static uint32_t compare_target_ticks = 10000000;
 static bool compare_high = true;
+static bool gpt2_output_high = false;
 
 void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, bool use_external_clock) {
   (void)output_freq_hz;  // Fixed 1 PPS output
@@ -78,6 +79,7 @@ void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, 
   compare_target_ticks = 10000000;
   compare_high = true;
   GPT2_OCR1 = compare_target_ticks;
+  gpt2_output_high = false;
 
   // Clear status flags
   GPT2_SR = 0x3F;
@@ -131,6 +133,7 @@ void gpt2_poll_capture() {
     compare_target_ticks += 5000000;
     GPT2_CR = (GPT2_CR & ~GPT_CR_OM1(0x7)) | GPT_CR_OM1(action_bits);
     GPT2_OCR1 = compare_target_ticks;
+    gpt2_output_high = compare_high;
   }
 }
 
@@ -141,4 +144,8 @@ void gpt2_stop() {
 
 bool gpt2_is_running() {
   return gpt2_running;
+}
+
+bool gpt2_is_output_high() {
+  return gpt2_output_high;
 }
