@@ -247,8 +247,6 @@ void print_other_commands() {
   Serial.println("  h       - Show this help\r");
   Serial.println("  v       - Toggle verbose timing output (currently OFF)\r");
   Serial.println("  b       - Reboot to bootloader mode\r");
-  Serial.println("  l       - List all log files on SD card\r");
-  Serial.println("  k       - Delete all log files except current one\r");
 }
 
 void print_help() {
@@ -554,97 +552,7 @@ void cmd_oscillator_output_enable(bool enable) {
 
 
 
-void cmd_list_log_files() {
-  Serial.println("\r\n=== SD Card Log Files ===\r");
-  
-  if (!g_sd_available) {
-    Serial.println("SD card not available.\r");
-    return;
-  }
-  
-  list_log_files(g_current_log_file);
-}
 
-void cmd_delete_old_log_files() {
-  Serial.println("\r\n=== Delete Old Log Files ===\r");
-  
-  if (!g_sd_available) {
-    Serial.println("SD card not available.\r");
-    return;
-  }
-  
-  if (g_current_log_file.length() == 0) {
-    Serial.println("No current log file - nothing to preserve.\r");
-    return;
-  }
-  
-  Serial.printf("This will delete ALL log files except current: %s\r\n", g_current_log_file.c_str());
-  Serial.println("WARNING: This action cannot be undone!\r");
-  Serial.println("Type 'DELETE' to confirm or any other key to cancel:");
-  
-  // Wait for first confirmation
-  String confirmation1 = "";
-  unsigned long timeout = millis() + 15000; // 15 second timeout
-  
-  while (millis() < timeout && confirmation1.length() == 0) {
-    if (Serial.available()) {
-      confirmation1 = Serial.readStringUntil('\n');
-      confirmation1.trim();
-      break;
-    }
-    delay(100);
-  }
-  
-  if (confirmation1 != "DELETE") {
-    Serial.println("Delete operation cancelled.\r");
-    return;
-  }
-  
-  // Second confirmation
-  Serial.println("Are you absolutely sure? Type 'YES' to proceed:");
-  
-  String confirmation2 = "";
-  timeout = millis() + 10000; // 10 second timeout
-  
-  while (millis() < timeout && confirmation2.length() == 0) {
-    if (Serial.available()) {
-      confirmation2 = Serial.readStringUntil('\n');
-      confirmation2.trim();
-      break;
-    }
-    delay(100);
-  }
-  
-  if (confirmation2 != "YES") {
-    Serial.println("Delete operation cancelled.\r");
-    return;
-  }
-  
-  Serial.println("Proceeding with deletion...\r");
-  
-  // Close current log file temporarily to avoid issues
-  bool was_open = false;
-  if (g_log_file) {
-    g_log_file.flush();
-    g_log_file.close();
-    was_open = true;
-  }
-  
-  // Use FileManager to handle the deletion
-  uint32_t deleted_count = delete_old_log_files(g_current_log_file);
-  
-  Serial.printf("Operation complete: %lu files deleted\r\n", deleted_count);
-  
-  // Reopen current log file if it was open
-  if (was_open && g_current_log_file.length() > 0) {
-    g_log_file = SD.open(g_current_log_file.c_str(), FILE_WRITE);
-    if (g_log_file) {
-      Serial.printf("Reopened current log file: %s\r\n", g_current_log_file.c_str());
-    } else {
-      Serial.printf("Warning: Failed to reopen current log file: %s\r\n", g_current_log_file.c_str());
-    }
-  }
-}
 
 
 
@@ -729,8 +637,6 @@ void process_single_command(char cmd) {
     case 'z': cmd_oscillator_output_enable(false); break;
     case 'h': print_help(); break;
     case 'b': cmd_reboot_to_bootloader(); break;
-    case 'l': cmd_list_log_files(); break;
-    case 'k': cmd_delete_old_log_files(); break;
     case 'v': 
       g_verbose_timing = !g_verbose_timing;
       Serial.printf("Verbose timing: %s\r\n", g_verbose_timing ? "ON" : "OFF");

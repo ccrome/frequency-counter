@@ -17,11 +17,9 @@ struct FileInfo {
 
 // Function declarations
 bool is_valid_filename(const String& filename);
-void list_log_files(const String& current_log_file);
 String get_filename_by_id(uint32_t file_id);
 uint32_t get_file_count();
 bool file_exists(const String& filename);
 FileInfo get_file_info(uint32_t file_id, const String& current_log_file);
-uint32_t delete_old_log_files(const String& current_log_file);
 
 #endif // FILE_MANAGER_H
