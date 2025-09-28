@@ -1,0 +1,72 @@
+name: Build Frequency Counter
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Cache PlatformIO dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.platformio/.cache
+          ~/.platformio/lib
+          ~/.platformio/platforms
+        key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+        restore-keys: |
+          ${{ runner.os }}-pio-
+          
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install PlatformIO
+      run: |
+        python -m pip install --upgrade pip
+        pip install platformio
+        
+    - name: Build firmware
+      run: |
+        pio run
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-build
+        path: |
+          .pio/build/teensy41/firmware.hex
+          .pio/build/teensy41/firmware.elf
+        retention-days: 30
+        
+    - name: Build size report
+      run: |
+        echo "## Build Size Report" >> $GITHUB_STEP_SUMMARY
+        echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+        if [ -f .pio/build/teensy41/firmware.hex ]; then
+          HEX_SIZE=$(stat -c%s .pio/build/teensy41/firmware.hex)
+          echo "| firmware.hex | ${HEX_SIZE} bytes |" >> $GITHUB_STEP_SUMMARY
+        fi
+        if [ -f .pio/build/teensy41/firmware.elf ]; then
+          ELF_SIZE=$(stat -c%s .pio/build/teensy41/firmware.elf)
+          echo "| firmware.elf | ${ELF_SIZE} bytes |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
