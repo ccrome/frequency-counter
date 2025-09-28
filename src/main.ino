@@ -276,6 +276,11 @@ void print_startup_info() {
   Serial.printf("Pin Configuration:\r\n");
   Serial.printf("  Pin %d: External clock input (optional)\r\n", GPT2_EXTCLK_PIN);
   Serial.printf("  Pin %d: GPS PPS input (always monitoring)\r\n", GPT2_CAPTURE_PIN);
+  Serial.printf("  Pin %d: SDA (I2C for SiT5501 oscillator)\r\n", 18);
+  Serial.printf("  Pin %d: SCL (I2C for SiT5501 oscillator)\r\n", 19);
+  Serial.printf("  Pin %d: Clock generator output enable\r\n", CLKGEN_OE);
+  Serial.printf("  Pin %d: 10 MHz clock output enable\r\n", CLK_10MHZ_OE);
+  Serial.printf("  Pin %d: PPS output enable\r\n", PPS_OE);
   Serial.printf("  Pin %d: 1 PPS output (always active)\r\n", GPT2_COMPARE_PIN);
   Serial.println("\r");
 }
@@ -483,8 +488,17 @@ void show_gpt2_status() {
   } else {
     Serial.println("No GPS PPS signals received yet\r");
   }
-  Serial.printf("Output frequency: 1 Hz on pin %d\r\n", GPT2_COMPARE_PIN);
-  Serial.printf("GPS PPS input: pin %d\r\n", GPT2_CAPTURE_PIN);
+  
+  Serial.println("Pin Configuration:\r");
+  Serial.printf("  Pin %d: External clock input (optional)\r\n", GPT2_EXTCLK_PIN);
+  Serial.printf("  Pin %d: GPS PPS input (always monitoring)\r\n", GPT2_CAPTURE_PIN);
+  Serial.printf("  Pin %d: SDA (I2C for SiT5501 oscillator)\r\n", 18);
+  Serial.printf("  Pin %d: SCL (I2C for SiT5501 oscillator)\r\n", 19);
+  Serial.printf("  Pin %d: Clock generator output enable\r\n", CLKGEN_OE);
+  Serial.printf("  Pin %d: 10 MHz clock output enable\r\n", CLK_10MHZ_OE);
+  Serial.printf("  Pin %d: PPS output enable\r\n", PPS_OE);
+  Serial.printf("  Pin %d: 1 PPS output (always active)\r\n", GPT2_COMPARE_PIN);
+  
   Serial.printf("GPT2 Counter: %lu\r\n", GPT2_CNT);
   Serial.printf("GPT2 Control: 0x%08lX\r\n", GPT2_CR);
   Serial.printf("Compare Register: %lu\r\n", GPT2_OCR1);
