@@ -272,7 +272,7 @@ void wait_for_serial() {
 }
 
 void print_startup_info() {
-  Serial.println("=== Precision Frequency Counter (Dual Mode) ===\r");
+  Serial.println("=== Precision Frequency Counter ===\r");
   Serial.printf("Pin Configuration:\r\n");
   Serial.printf("  Pin %d: External clock input (optional)\r\n", GPT2_EXTCLK_PIN);
   Serial.printf("  Pin %d: GPS PPS input (always monitoring)\r\n", GPT2_CAPTURE_PIN);
@@ -322,7 +322,7 @@ void setup() {
   load_frequency_offset();  // Load persistent frequency offset
 
   print_help();
-  Serial.println("System initialized in Dual Mode. 1 PPS output active, GPS PPS monitoring enabled.\r\n");
+  Serial.println("System initialized. 1 PPS output active, GPS PPS monitoring enabled.\r\n");
   
   // Apply the loaded frequency offset
   oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
@@ -476,7 +476,6 @@ void cmd_set_frequency_offset(const String& command) {
 }
 
 void show_gpt2_status() {
-  Serial.println("GPT2 Mode: Dual Mode (always active)\r");
   Serial.printf("GPS PPS samples collected: %lu\r\n", g_sample_count);
   if (g_sample_count > 0) {
     double avg_hz = g_sum_hz / g_sample_count;

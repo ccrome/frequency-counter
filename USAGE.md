@@ -1,7 +1,7 @@
 # Frequency Counter Usage Guide
 
 ## Overview
-This precision frequency counter now supports dual-mode operation with comprehensive serial command interface.
+This precision frequency counter provides always-on operation with comprehensive serial command interface.
 
 ## Operating Modes
 

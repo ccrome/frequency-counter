@@ -1,6 +1,6 @@
 # Frequency Counter!
 
-A precision frequency counter with **always-on dual-mode operation** using GPS PPS as reference.
+A precision frequency counter with **always-on operation** using GPS PPS as reference.
 
 ## Features
 
@@ -12,8 +12,8 @@ A precision frequency counter with **always-on dual-mode operation** using GPS P
 
 ## Operating Mode
 
-### Dual Mode (Always Active)
-The system operates in a single, robust dual mode:
+### Always-On Operation
+The system operates in a single, robust mode:
 
 - **Output Compare**: Always generates 1 PPS (or other frequencies) on pin 16
 - **Input Capture**: Continuously monitors pin 15 for GPS PPS signals
@@ -44,5 +44,5 @@ Key commands available via serial interface:
 ## Usage Examples
 
 See `examples/` directory for:
-- `gpt2_dual_mode_example.ino` - Demonstrates the dual-mode operation
+- `gpt2_dual_mode_example.ino` - Demonstrates the always-on operation
 - `sit5501_example.ino` - Shows SiT5501 oscillator control via I2C

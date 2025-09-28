@@ -1,6 +1,6 @@
 /**
  * @file gpt2_dual_mode_example.ino
- * @brief Example demonstrating GPT2 dual mode operation
+ * @brief Example demonstrating GPT2 operation with always-on output
  * 
  * This example shows how to switch between:
  * - Input Capture Mode: For frequency measurement
@@ -26,7 +26,7 @@ void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
     
-    Serial.println("GPT2 Dual Mode Example\r");
+    Serial.println("GPT2 Example\r");
     Serial.println("======================\r");
     Serial.println("\r");
     Serial.println("Pin Configuration:\r");
