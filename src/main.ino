@@ -7,6 +7,7 @@
 #include "SiT5501.h"
 #include "display.h"
 #include <ArduinoNmeaParser.h>
+#include <MTP_Teensy.h>
 #include "FileManager.h"
 void onRmcUpdate(nmea::RmcData const rmc);
 
@@ -299,6 +300,13 @@ void initialize_oscillator() {
     oscillator.setOutputEnable(true);
   }
 }
+void initialize_mtp() {
+    if (g_sd_available) {
+	MTP.begin();
+	MTP.addFilesystem(SD, "SD Card", MTP_FSTYPE_SD);
+    }
+}
+    
 void setup() {
   Serial1.begin(9600);
   setup_pins();
@@ -307,6 +315,7 @@ void setup() {
 
   print_startup_info();
   initialize_sd_card();
+  initialize_mtp();
   initialize_gpt2();
   initialize_oscillator();
   if (display_init()) {
@@ -1185,6 +1194,8 @@ void loop() {
       status.utc_valid = false;
     }
   }
+  if (g_sd_available)
+      MTP.loop();
   status.output_high = gpt2_is_output_high();
   display_update(status);
 }
