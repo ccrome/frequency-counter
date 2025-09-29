@@ -20,7 +20,13 @@ struct DisplayStatus {
   bool utc_valid;
   DisplayUtcTime utc;
   bool output_high;
-
+  
+  // Calibration status
+  bool calibrating;
+  uint32_t cal_remaining_seconds;
+  uint32_t cal_phase;  // 1 or 2
+  double cal_current_ppm;
+  double cal_offset_ppm;  // Current calibration offset
 };
 
 bool display_init();

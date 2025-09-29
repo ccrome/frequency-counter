@@ -38,6 +38,26 @@ struct GpsData {
 static double g_sum_hz = 0.0;
 static uint32_t g_sample_count = 0;
 
+// Calibration state
+enum CalibrationState {
+  CAL_IDLE,
+  CAL_PHASE1_AVERAGING,  // First phase of averaging
+  CAL_PHASE2_AVERAGING   // Second phase of averaging after offset applied
+};
+
+struct CalibrationData {
+  CalibrationState state;
+  uint32_t start_time;
+  double phase1_result;
+  double original_offset;
+  uint32_t duration_seconds;  // Configurable calibration duration
+  uint32_t expected_pulses;   // Expected number of pulses for current phase
+  uint32_t missed_pulses;     // Count of missed pulses during calibration
+  bool auto_started;          // True if calibration was auto-started
+};
+
+static CalibrationData g_calibration = {CAL_IDLE, 0, 0.0, 0.0, 300, 0, 0, false};
+
 // Data structures
 static PpsData g_pps_data = {0};
 static GpsData g_gps_data = {0};
@@ -224,6 +244,8 @@ void print_mode_commands() {
   Serial.println("  s - Show current status\r");
   Serial.println("  r - Reset frequency measurement statistics\r");
   Serial.println("  c - Cycle GPS PPS capture edge (rising/falling/both)\r");
+  Serial.printf("  l       - Start calibration procedure (2x %lu second averaging)\r\n", g_calibration.duration_seconds);
+  Serial.println("  l<time> - Start calibration with custom duration in seconds (e.g., l60 or l600)\r");
 }
 
 void print_output_commands() {
@@ -234,10 +256,8 @@ void print_output_commands() {
 
 void print_oscillator_commands() {
   Serial.println("SiT5501 Oscillator Control:\r");
-  Serial.println("  p<ppm>  - Set frequency offset in PPM (e.g., p+5.2 or p-3.1)\r");
-  Serial.println("  p0      - Reset to center frequency (0 PPM)\r");
-  Serial.println("  o<ppm>  - Set persistent frequency offset in PPM (e.g., o0.01526 or o-5.0)\r");
-  Serial.println("  o       - Show current persistent frequency offset\r");
+  Serial.println("  p<ppb>  - Set frequency offset in PPB and save to EEPROM (e.g., p+5200 or p-3100)\r");
+  Serial.println("  p       - Show current frequency offset\r");
   Serial.println("  e       - Enable oscillator output\r");
   Serial.println("  z       - Disable oscillator output\r");
 }
@@ -331,7 +351,7 @@ void setup() {
   
   // Apply the loaded frequency offset
   oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
-  Serial.printf("Applied frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+  Serial.printf("Applied frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
 
 }
 
@@ -376,15 +396,16 @@ void load_frequency_offset() {
   }
   
   // Validate frequency offset range
-  if (isnan(data.frequency_offset_ppm) || data.frequency_offset_ppm < -1000.0 || data.frequency_offset_ppm > 1000.0) {
-    Serial.println("EEPROM frequency offset out of range, using defaults\r");
+  double pull_range = oscillator.isPresent() ? oscillator.getPullRange() : 50.0; // Default to reasonable range if oscillator not present
+  if (isnan(data.frequency_offset_ppm) || data.frequency_offset_ppm < -pull_range || data.frequency_offset_ppm > pull_range) {
+    Serial.printf("EEPROM frequency offset out of range (±%.0f ppb), using defaults\r\n", pull_range * 1000.0);
     g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
     save_frequency_offset();
     return;
   }
   
   g_frequency_offset_ppm = data.frequency_offset_ppm;
-  Serial.printf("Loaded frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+  Serial.printf("Loaded frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
 }
 
 void save_frequency_offset() {
@@ -395,7 +416,7 @@ void save_frequency_offset() {
   data.checksum = calculate_checksum(data);
   
   EEPROM.put(EEPROM_DATA_ADDR, data);
-  Serial.printf("Saved frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
+  Serial.printf("Saved frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
 }
 
 bool initialize_sd_card() {
@@ -456,29 +477,6 @@ void cmd_set_output_frequency(const String& command) {
   Serial.printf("Signal available on pin %d\r\n", GPT2_COMPARE_PIN);
 }
 
-void cmd_set_frequency_offset(const String& command) {
-  String param = command.substring(1);
-  param.trim();
-  
-  if (param.length() == 0) {
-    // Show current offset
-    Serial.printf("Current frequency offset: %.6f ppm\r\n", g_frequency_offset_ppm);
-    return;
-  }
-  
-  double offset = param.toFloat();
-  if (offset >= -1000.0 && offset <= 1000.0) {
-    g_frequency_offset_ppm = offset;
-    save_frequency_offset();  // Save to EEPROM
-    
-    // Apply the new offset to oscillator
-    oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
-    
-    Serial.printf("Frequency offset set to: %.6f ppm\r\n", g_frequency_offset_ppm);
-  } else {
-    Serial.println("Error: Frequency offset must be between -1000.0 and 1000.0 ppm\r");
-  }
-}
 
 void show_gpt2_status() {
   Serial.printf("GPS PPS samples collected: %lu\r\n", g_sample_count);
@@ -515,10 +513,41 @@ void show_oscillator_status() {
   }
 }
 
+void show_calibration_status() {
+  if (g_calibration.state == CAL_IDLE) {
+    Serial.println("Calibration: Not active\r");
+    return;
+  }
+  
+  uint32_t elapsed_ms = millis() - g_calibration.start_time;
+  uint32_t elapsed_seconds = elapsed_ms / 1000;
+  uint32_t remaining_seconds = g_calibration.duration_seconds - elapsed_seconds;
+  
+  double current_avg_ppm = 0.0;
+  if (g_sample_count > 0) {
+    double current_avg_hz = g_sum_hz / g_sample_count;
+    current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+  }
+  
+  if (g_calibration.state == CAL_PHASE1_AVERAGING) {
+    Serial.printf("Calibration Phase 1: %lu/%lu seconds (%lu remaining)\r\n", 
+                  elapsed_seconds, g_calibration.duration_seconds, remaining_seconds);
+    Serial.printf("Current average: %.1f ppb (%lu samples, %lu missed)\r\n", 
+                  current_avg_ppm * 1000.0, g_sample_count, g_calibration.missed_pulses);
+  } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
+    Serial.printf("Calibration Phase 2: %lu/%lu seconds (%lu remaining)\r\n", 
+                  elapsed_seconds, g_calibration.duration_seconds, remaining_seconds);
+    Serial.printf("Applied correction: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+    Serial.printf("Current average: %.1f ppb (%lu samples, %lu missed)\r\n", 
+                  current_avg_ppm * 1000.0, g_sample_count, g_calibration.missed_pulses);
+  }
+}
+
 void cmd_show_status() {
   Serial.println("\r\n=== System Status ===\r");
   show_gpt2_status();
   show_oscillator_status();
+  show_calibration_status();
 }
 
 void cmd_set_oscillator_ppm(const String& command) {
@@ -527,11 +556,33 @@ void cmd_set_oscillator_ppm(const String& command) {
     return;
   }
 
-  double ppm = command.substring(1).toFloat();
+  String param = command.substring(1);
+  param.trim();
+  
+  if (param.length() == 0) {
+    // Show current offset
+    double pull_range = oscillator.getPullRange();
+    Serial.printf("Current frequency offset: %.1f ppb (range: ±%.0f ppb)\r\n", g_frequency_offset_ppm * 1000.0, pull_range * 1000.0);
+    return;
+  }
+  
+  double ppb = param.toFloat();
+  double ppm = ppb / 1000.0;  // Convert ppb input to ppm for internal use
+  double pull_range = oscillator.getPullRange();
+  
+  // Check against oscillator's actual range
+  if (ppm < -pull_range || ppm > pull_range) {
+    Serial.printf("Error: Value must be between %.0f and %.0f ppb (oscillator pull range)\r\n", -pull_range * 1000.0, pull_range * 1000.0);
+    return;
+  }
+  
   if (oscillator.setFrequencyOffsetPPM(ppm)) {
-    Serial.printf("Oscillator frequency offset set to %.3f PPM\r\n", ppm);
-      } else {
-    Serial.println("Error: PPM out of range (±3200 PPM max) or I2C error\r");
+    // Update global variable and save to EEPROM
+    g_frequency_offset_ppm = ppm;
+    save_frequency_offset();
+    Serial.printf("Oscillator frequency offset set to %.1f ppb and saved to EEPROM\r\n", ppb);
+  } else {
+    Serial.println("Error: Failed to set oscillator frequency offset\r");
   }
 }
 
@@ -590,6 +641,108 @@ void cmd_reboot_to_bootloader() {
   }
 }
 
+void cmd_start_calibration_with_time(const String& command) {
+  String param = command.substring(1);
+  param.trim();
+  
+  // Set calibration duration
+  if (param.length() > 0) {
+    uint32_t duration = param.toInt();
+    if (duration < 10 || duration > 3600) {
+      Serial.println("Error: Calibration time must be between 10 and 3600 seconds\r");
+      return;
+    }
+    g_calibration.duration_seconds = duration;
+    Serial.printf("Calibration duration set to %lu seconds per phase\r\n", duration);
+  } else {
+    // Reset to default if no parameter
+    g_calibration.duration_seconds = 300;
+    Serial.printf("Using default calibration duration: %lu seconds per phase\r\n", g_calibration.duration_seconds);
+  }
+  
+  // Call the existing calibration function
+  cmd_start_calibration();
+}
+
+void start_calibration_internal(bool auto_started) {
+  // Store original offset
+  g_calibration.original_offset = g_frequency_offset_ppm;
+  g_calibration.auto_started = auto_started;
+  
+  // Set PPM offset to 0
+  g_frequency_offset_ppm = 0.0;
+  oscillator.setFrequencyOffsetPPM(0.0);
+  
+  // Wait 1 millisecond as requested
+  delay(1);
+  
+  // Reset averaging
+  reset_measurement_stats();
+  
+  // Start calibration
+  g_calibration.state = CAL_PHASE1_AVERAGING;
+  g_calibration.start_time = millis();
+  g_calibration.phase1_result = 0.0;
+  g_calibration.expected_pulses = g_sample_count;  // Track expected pulses from current count
+  g_calibration.missed_pulses = 0;
+  
+  if (auto_started) {
+    Serial.println("\r\n=== AUTO-CALIBRATION STARTED ===\r");
+    Serial.println("No calibration offset detected. Starting automatic calibration.\r");
+  }
+  
+  Serial.printf("Calibration phase 1 started. Collecting data for %lu seconds...\r\n", g_calibration.duration_seconds);
+  Serial.println("Status updates every 1 second. Use 's' command to check progress anytime.\r");
+}
+
+void cmd_start_calibration() {
+  if (g_calibration.state != CAL_IDLE) {
+    Serial.println("Calibration already in progress. Wait for completion or restart system.\r");
+    return;
+  }
+  
+  if (!oscillator.isPresent()) {
+    Serial.println("Error: SiT5501 oscillator not found - calibration requires oscillator control\r");
+    return;
+  }
+  
+  // Show calibration information and ask for confirmation
+  Serial.println("\r\n=== CALIBRATION PROCEDURE ===\r");
+  Serial.printf("This will run a 2-phase calibration (%lu seconds each phase):\r\n", g_calibration.duration_seconds);
+  Serial.println("Phase 1: Reset offset to 0 and measure frequency error\r");
+  Serial.println("Phase 2: Apply correction and verify results\r");
+  Serial.printf("Current offset: %.1f ppb will be temporarily changed\r\n", g_frequency_offset_ppm * 1000.0);
+  Serial.println("\r");
+  uint32_t total_minutes = (g_calibration.duration_seconds * 2) / 60;
+  Serial.printf("WARNING: This will take approximately %lu minutes to complete.\r\n", total_minutes);
+  Serial.println("Make sure GPS PPS signal is stable before proceeding.\r");
+  Serial.println("\r");
+  Serial.println("Type 'y' to start calibration, any other key to cancel: ");
+  
+  // Wait for user confirmation
+  while (!Serial.available()) {
+    delay(10);
+  }
+  
+  char response = Serial.read();
+  Serial.println(response); // Echo the response
+  
+  // Clear any remaining characters
+  while (Serial.available()) {
+    Serial.read();
+  }
+  
+  if (response != 'y' && response != 'Y') {
+    Serial.println("Calibration cancelled.\r");
+    return;
+  }
+  
+  Serial.println("Starting calibration procedure...\r");
+  Serial.printf("Phase 1: Setting PPM offset to 0 and averaging for %lu seconds\r\n", g_calibration.duration_seconds);
+  
+  start_calibration_internal(false);
+}
+
 void handle_serial_commands() {
   static String command_buffer = "";
   static bool reading_parameter_command = false;
@@ -610,7 +763,7 @@ void handle_serial_commands() {
       Serial.print(c);
 
         // Check if this is a parameter command that needs more input
-      if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'o' || c == 'g') {
+      if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'g' || c == 'l') {
           command_buffer = String(c);
           reading_parameter_command = true;
           continue;
@@ -678,7 +831,7 @@ void process_parameter_command(String command) {
       cmd_set_output_frequency(command);
       break;
     case 'p': cmd_set_oscillator_ppm(command); break;
-    case 'o': cmd_set_frequency_offset(command); break;
+    case 'l': cmd_start_calibration_with_time(command); break;
     case 'g':
       if (command.length() == 2) {
         char arg = command.charAt(1);
@@ -705,7 +858,6 @@ void process_parameter_command(String command) {
 }
 
 void process_frequency_measurement() {
-  gpt2_poll_capture();
   if (!gpt2_capture_available()) return;
 
   // Only process once per PPS pulse - read capture and immediately process
@@ -736,9 +888,9 @@ void process_frequency_measurement() {
   if (!g_pause_updates && g_verbose_timing) {
     double freq_mhz = g_pps_data.ticks / 1e6;  // Calculate MHz from ticks
     double avg_freq_mhz = g_pps_data.avg_freq_hz / 1e6;  // Calculate avg MHz
-    Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppm(lat)=%.3f ppm(avg)=%.6f\r\n",
+    Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppb(lat)=%.1f ppb(avg)=%.1f\r\n",
                   (unsigned long)g_sample_count, g_pps_data.ticks, freq_mhz, 
-                  avg_freq_mhz, g_pps_data.ppm_instantaneous, g_pps_data.ppm_average);
+                  avg_freq_mhz, g_pps_data.ppm_instantaneous * 1000.0, g_pps_data.ppm_average * 1000.0);
   }
 }
 
@@ -759,6 +911,134 @@ void print_oscillator_status() {
   }
 }
 
+void process_calibration() {
+  if (g_calibration.state == CAL_IDLE) {
+    return;  // No calibration in progress
+  }
+  
+  uint32_t elapsed_ms = millis() - g_calibration.start_time;
+  uint32_t elapsed_seconds = elapsed_ms / 1000;
+  
+  // Check for missed pulses during calibration
+  uint32_t expected_pulses_now = g_calibration.expected_pulses + elapsed_seconds;
+  if (g_sample_count < expected_pulses_now) {
+    uint32_t current_missed = expected_pulses_now - g_sample_count;
+    if (current_missed > g_calibration.missed_pulses) {
+      g_calibration.missed_pulses = current_missed;
+      if (g_calibration.missed_pulses > 10) {
+        Serial.printf("\r\nCALIBRATION ABORTED: Too many missed GPS pulses (%lu missed)\r\n", g_calibration.missed_pulses);
+        Serial.println("GPS signal appears unstable. Please check GPS reception.\r");
+        
+        // Restore original offset
+        g_frequency_offset_ppm = g_calibration.original_offset;
+        oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
+        Serial.printf("Restored original offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+        
+        g_calibration.state = CAL_IDLE;
+        return;
+      }
+    }
+  }
+  
+  // Progress reporting every 10 seconds during calibration
+  static uint32_t last_progress_report = 0;
+  if (elapsed_seconds >= last_progress_report + 1) {
+    last_progress_report = elapsed_seconds;
+    uint32_t remaining_seconds = g_calibration.duration_seconds - elapsed_seconds;
+    
+    if (g_calibration.state == CAL_PHASE1_AVERAGING) {
+      double current_avg_ppm = 0.0;
+      if (g_sample_count > 0) {
+        double current_avg_hz = g_sum_hz / g_sample_count;
+        current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+      }
+      Serial.printf("Calibration Phase 1: %lu seconds remaining, current avg: %.1f ppb (%lu samples)\r\n", 
+                    remaining_seconds, current_avg_ppm * 1000.0, g_sample_count);
+    } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
+      double current_avg_ppm = 0.0;
+      if (g_sample_count > 0) {
+        double current_avg_hz = g_sum_hz / g_sample_count;
+        current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+      }
+      Serial.printf("Calibration Phase 2: %lu seconds remaining, current avg: %.1f ppb (%lu samples)\r\n", 
+                    remaining_seconds, current_avg_ppm * 1000.0, g_sample_count);
+    }
+  }
+  
+  if (elapsed_seconds >= g_calibration.duration_seconds) {  // Duration completed
+    if (g_calibration.state == CAL_PHASE1_AVERAGING) {
+      // Phase 1 complete - calculate average and start phase 2
+      if (g_sample_count > 0) {
+        g_calibration.phase1_result = g_sum_hz / g_sample_count;
+        double avg_ppm = ((g_calibration.phase1_result - 10000000.0) / 10000000.0) * 1e6;
+        
+        Serial.printf("Phase 1 complete. Average frequency: %.12f Hz (%.1f ppb error)\r\n", 
+                      g_calibration.phase1_result, avg_ppm * 1000.0);
+        
+        // Set new PPM offset based on phase 1 results
+        g_frequency_offset_ppm = -avg_ppm;  // Negative to correct the error
+        oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
+        
+        Serial.printf("Applied correction: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+        Serial.printf("Phase 2: Averaging for another %lu seconds with correction applied\r\n", g_calibration.duration_seconds);
+        
+        // Reset for phase 2
+        reset_measurement_stats();
+        g_calibration.state = CAL_PHASE2_AVERAGING;
+        g_calibration.start_time = millis();
+        g_calibration.expected_pulses = g_sample_count;  // Reset expected pulse count for phase 2
+        g_calibration.missed_pulses = 0;  // Reset missed pulse count for phase 2
+        last_progress_report = 0;
+      } else {
+        Serial.println("Calibration failed: No GPS PPS data received during phase 1\r");
+        g_calibration.state = CAL_IDLE;
+      }
+    } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
+      // Phase 2 complete - report final results
+      if (g_sample_count > 0) {
+        double phase2_avg = g_sum_hz / g_sample_count;
+        double phase2_ppm = ((phase2_avg - 10000000.0) / 10000000.0) * 1e6;
+        
+        Serial.println("\r\n=== CALIBRATION COMPLETE ===\r");
+        Serial.printf("Phase 1 average: %.12f Hz (%.1f ppb error)\r\n", 
+                      g_calibration.phase1_result, 
+                      ((g_calibration.phase1_result - 10000000.0) / 10000000.0) * 1e6 * 1000.0);
+        Serial.printf("Applied correction: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+        Serial.printf("Phase 2 average: %.12f Hz (%.1f ppb residual error)\r\n", 
+                      phase2_avg, phase2_ppm * 1000.0);
+        Serial.printf("Final oscillator offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+        
+        // Save the new offset to EEPROM
+        save_frequency_offset();
+        Serial.println("Calibration offset saved to EEPROM\r");
+      } else {
+        Serial.println("Calibration failed: No GPS PPS data received during phase 2\r");
+        // Restore original offset
+        g_frequency_offset_ppm = g_calibration.original_offset;
+        oscillator.setFrequencyOffsetPPM(g_frequency_offset_ppm);
+        Serial.printf("Restored original offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+      }
+      
+      g_calibration.state = CAL_IDLE;
+      Serial.println("Calibration procedure finished.\r\n");
+    }
+  }
+}
+
+void check_auto_calibration() {
+  // Only check if not already calibrating and oscillator is present
+  if (g_calibration.state != CAL_IDLE || !oscillator.isPresent()) {
+    return;
+  }
+  
+  // Check if we have no calibration offset (indicating no previous calibration)
+  // and we have received more than 10 GPS PPS pulses
+  if (g_frequency_offset_ppm == 0.0 && g_sample_count > 10) {
+    Serial.println("\r\nAuto-calibration trigger: No calibration offset detected after 10+ GPS pulses.\r");
+    start_calibration_internal(true);
+  }
+}
+
 void process_nmea_messages(void) {
     while (Serial1.available()) {
 	parser.encode((char)Serial1.read());
@@ -768,8 +1048,16 @@ void process_nmea_messages(void) {
 void loop() {
   handle_serial_commands();
 
+  // Always poll GPT2 for both capture and compare events
+  gpt2_poll_capture();
+  
   // Always process GPS PPS measurements (if available)
   process_frequency_measurement();
+  
+  // Check for auto-calibration start condition
+  check_auto_calibration();
+  
+  process_calibration();
   process_nmea_messages();
 
   DisplayStatus status;
@@ -796,5 +1084,30 @@ void loop() {
   if (g_sd_available)
       MTP.loop();
   status.output_high = gpt2_is_output_high();
+  
+  // Calibration status for display
+  status.calibrating = (g_calibration.state != CAL_IDLE);
+  status.cal_offset_ppm = g_frequency_offset_ppm;
+  
+  if (status.calibrating) {
+    uint32_t elapsed_ms = millis() - g_calibration.start_time;
+    uint32_t elapsed_seconds = elapsed_ms / 1000;
+    status.cal_remaining_seconds = (elapsed_seconds < g_calibration.duration_seconds) ? 
+                                   (g_calibration.duration_seconds - elapsed_seconds) : 0;
+    status.cal_phase = (g_calibration.state == CAL_PHASE1_AVERAGING) ? 1 : 2;
+    
+    // Calculate current average PPM
+    if (g_sample_count > 0) {
+      double current_avg_hz = g_sum_hz / g_sample_count;
+      status.cal_current_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+    } else {
+      status.cal_current_ppm = 0.0;
+    }
+  } else {
+    status.cal_remaining_seconds = 0;
+    status.cal_phase = 0;
+    status.cal_current_ppm = 0.0;
+  }
+  
   display_update(status);
 }

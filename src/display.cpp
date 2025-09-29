@@ -71,17 +71,57 @@ void display_update(DisplayStatus const& status) {
     display.drawCircle(indicator_x, indicator_y, 3, SSD1306_WHITE);
   }
 
-  if (status.sample_count > 0 && status.pps_locked) {
+  if (status.calibrating) {
+    // Show calibration status
+    display.print(F("CALIBRATING P"));
+    display.println(status.cal_phase);
+    
+    // Show countdown
+    uint32_t minutes = status.cal_remaining_seconds / 60;
+    uint32_t seconds = status.cal_remaining_seconds % 60;
+    display.print(F("Time: "));
+    display.print(minutes);
+    display.print(F(":"));
+    if (seconds < 10) display.print(F("0"));
+    display.println(seconds);
+    
+    // Show current average in ppb
+    display.print(F("Avg: "));
+    display.print(status.cal_current_ppm * 1000.0, 1);
+    display.println(F(" ppb"));
+    
+    display.print(F("Samples: "));
+    display.println(status.sample_count);
+  } else if (status.sample_count > 0 && status.pps_locked) {
+    // Normal operation - show PPM measurements and calibration offset
     double ppb_inst = status.ppm_error * 1000.0;
     double ppb_avg = status.ppm_average * 1000.0;
     display.print(F("PPB Inst:"));
     display.println(ppb_inst, 2);
     display.print(F("PPB Avg :"));
     display.println(ppb_avg, 2);
+    
+    // Show sample count
     display.print(F("Samples: "));
     display.println(status.sample_count);
+    
+    // Show calibration offset in ppb
+    display.print(F("CAL OFFSET: "));
+    display.print(status.cal_offset_ppm * 1000.0, 1);
+    display.println(F("ppb"));
   } else {
     display.println(F("Waiting for PPS"));
+    
+    // Show sample count even when waiting
+    if (status.sample_count > 0) {
+      display.print(F("Samples: "));
+      display.println(status.sample_count);
+    }
+    
+    // Show calibration offset even when waiting in ppb
+    display.print(F("CAL OFFSET: "));
+    display.print(status.cal_offset_ppm * 1000.0, 1);
+    display.println(F("ppb"));
   }
 
   display.display();
