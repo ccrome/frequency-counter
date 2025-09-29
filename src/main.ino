@@ -8,7 +8,6 @@
 #include "display.h"
 #include <ArduinoNmeaParser.h>
 #include <MTP_Teensy.h>
-#include "FileManager.h"
 void onRmcUpdate(nmea::RmcData const rmc);
 
 SiT5501 oscillator(0x60);
@@ -22,10 +21,10 @@ struct PpsData {
   bool has_data;
 };
 
-// GPS data structure
+// GPS data structure - using fixed-size char arrays to prevent fragmentation
 struct GpsData {
-  String timestamp;
-  String source;
+  char timestamp[24];      // "2025-09-29T12:34:56Z" + null terminator
+  char source[16];         // "GLONASS" + null terminator  
   double latitude;
   double longitude;
   double speed;
@@ -67,7 +66,7 @@ static GpsData g_gps_data = {0};
 static bool g_sd_available = false;
 static bool g_pause_updates = false;
 static bool g_verbose_timing = false;  // Start with verbose timing off
-static String g_current_log_file = "";
+static char g_current_log_file[32] = "";  // Fixed-size buffer for log filename
 static File g_log_file;
 static uint32_t g_last_pps_millis = 0;
 
@@ -92,16 +91,14 @@ const char* rmc_source_map[] = {
     "Unknown", "GPS", "Galileo", "GLONASS", "GNSS", "BDS"
 };
 
-String float_to_json_string(double value, int precision) {
+// Convert float to JSON string - writes to provided buffer to avoid String allocation
+void float_to_json_string(char* buffer, size_t buffer_size, double value, int precision) {
   if (isnan(value)) {
-    return "null";
+    strncpy(buffer, "null", buffer_size - 1);
+    buffer[buffer_size - 1] = '\0';
+  } else {
+    snprintf(buffer, buffer_size, "%.*f", precision, value);
   }
-  return String(value, precision);
-}
-
-void log_json_field(File& file, const char* name, const String& value, bool is_first = false) {
-  if (!is_first) file.print(",");
-  file.printf("\"%s\":%s", name, value.c_str());
 }
 
 void log_json_field(File& file, const char* name, const char* value, bool is_first = false) {
@@ -116,7 +113,10 @@ void log_json_field(File& file, const char* name, uint32_t value, bool is_first 
 
 void log_json_field_if_valid(File& file, const char* name, double value, int precision) {
   if (!isnan(value)) {
-    log_json_field(file, name, float_to_json_string(value, precision));
+    char buffer[32];
+    float_to_json_string(buffer, sizeof(buffer), value, precision);
+    file.print(",");
+    file.printf("\"%s\":%s", name, buffer);
   }
 }
 
@@ -132,17 +132,20 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	nmea::RmcSource rmc_source = rmc.source;
 	if (rmc_source > nmea::RmcSource::BDS)
 	    rmc_source = nmea::RmcSource::Unknown;
-	int rmc_source_i = static_cast<int>(nmea::RmcSource::GPS);
+	int rmc_source_i = static_cast<int>(rmc_source);
+	// Bounds check for safety
+	if (rmc_source_i < 0 || rmc_source_i >= (int)(sizeof(rmc_source_map)/sizeof(rmc_source_map[0]))) {
+	    rmc_source_i = 0; // Default to "Unknown"
+	}
 	const char *rmc_source_s = rmc_source_map[rmc_source_i];
 
-	// Store GPS data in struct
-	g_gps_data.timestamp = String(rmc.date.year) + "-" + 
-	                      String(rmc.date.month < 10 ? "0" : "") + String(rmc.date.month) + "-" + 
-	                      String(rmc.date.day < 10 ? "0" : "") + String(rmc.date.day) + "T" +
-	                      String(rmc.time_utc.hour < 10 ? "0" : "") + String(rmc.time_utc.hour) + ":" +
-	                      String(rmc.time_utc.minute < 10 ? "0" : "") + String(rmc.time_utc.minute) + ":" +
-	                      String(rmc.time_utc.second < 10 ? "0" : "") + String(rmc.time_utc.second) + "Z";
-	g_gps_data.source = String(rmc_source_s);
+	// Store GPS data in struct - using snprintf to avoid String fragmentation
+	snprintf(g_gps_data.timestamp, sizeof(g_gps_data.timestamp), 
+	         "%04d-%02d-%02dT%02d:%02d:%02dZ",
+	         rmc.date.year, rmc.date.month, rmc.date.day,
+	         rmc.time_utc.hour, rmc.time_utc.minute, rmc.time_utc.second);
+	strncpy(g_gps_data.source, rmc_source_s, sizeof(g_gps_data.source) - 1);
+	g_gps_data.source[sizeof(g_gps_data.source) - 1] = '\0';  // Ensure null termination
 	g_gps_data.latitude = rmc.latitude;
 	g_gps_data.longitude = rmc.longitude;
 	g_gps_data.speed = rmc.speed;
@@ -153,17 +156,24 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	// Create log file on first GPS message using GPS timestamp
 	if (!g_log_file && g_sd_available) {
 	    // Create filename from GPS timestamp (replace : with - for filesystem compatibility)
-	    String filename = g_gps_data.timestamp;
-	    filename.replace(":", "-");
-	    filename += ".jsonl";
+	    char filename[32];
+	    strncpy(filename, g_gps_data.timestamp, sizeof(filename) - 7);  // Leave room for ".jsonl"
+	    filename[sizeof(filename) - 7] = '\0';
 	    
-	    g_current_log_file = filename;
-	    g_log_file = SD.open(filename.c_str(), FILE_WRITE);
+	    // Replace : with - for filesystem compatibility
+	    for (int i = 0; filename[i] != '\0'; i++) {
+	        if (filename[i] == ':') filename[i] = '-';
+	    }
+	    strcat(filename, ".jsonl");
+	    
+	    strncpy(g_current_log_file, filename, sizeof(g_current_log_file) - 1);
+	    g_current_log_file[sizeof(g_current_log_file) - 1] = '\0';
+	    g_log_file = SD.open(filename, FILE_WRITE);
 	    
 	    if (g_log_file) {
-	        Serial.printf("Created GPS-timestamped log file: %s\r\n", filename.c_str());
+	        Serial.printf("Created GPS-timestamped log file: %s\r\n", filename);
 	    } else {
-	        Serial.printf("Failed to create log file: %s\r\n", filename.c_str());
+	        Serial.printf("Failed to create log file: %s\r\n", filename);
 	    }
 	}
 
@@ -176,8 +186,8 @@ void onRmcUpdate(nmea::RmcData const rmc)
 	    g_log_file.print("{");
 	    
 	    // GPS timestamp and source (always present)
-	    log_json_field(g_log_file, "gps_timestamp", g_gps_data.timestamp.c_str(), true);
-	    log_json_field(g_log_file, "gps_source", g_gps_data.source.c_str());
+            log_json_field(g_log_file, "gps_timestamp", g_gps_data.timestamp, true);
+            log_json_field(g_log_file, "gps_source", g_gps_data.source);
 	    
 	    // GPS data (only if valid)
 	    log_json_field_if_valid(g_log_file, "gps_lat", g_gps_data.latitude, 6);
@@ -467,7 +477,7 @@ void cmd_set_capture_edge() {
   gpt2_set_capture_edge(current_edge);
 }
 
-void cmd_set_output_frequency(const String& command) {
+void cmd_set_output_frequency(const char* command) {
   (void)command;
   if (pps_release_to_gpt()) {
     Serial.println("Resumed GPT2 control of PPS output.\r");
@@ -513,6 +523,7 @@ void show_oscillator_status() {
   }
 }
 
+
 void show_calibration_status() {
   if (g_calibration.state == CAL_IDLE) {
     Serial.println("Calibration: Not active\r");
@@ -550,23 +561,22 @@ void cmd_show_status() {
   show_calibration_status();
 }
 
-void cmd_set_oscillator_ppm(const String& command) {
+void cmd_set_oscillator_ppm(const char* command) {
   if (!oscillator.isPresent()) {
     Serial.println("Error: SiT5501 oscillator not found\r");
     return;
   }
 
-  String param = command.substring(1);
-  param.trim();
+  const char* param = command + 1;  // Skip the command character
   
-  if (param.length() == 0) {
+  if (strlen(param) == 0) {
     // Show current offset
     double pull_range = oscillator.getPullRange();
     Serial.printf("Current frequency offset: %.1f ppb (range: ±%.0f ppb)\r\n", g_frequency_offset_ppm * 1000.0, pull_range * 1000.0);
     return;
   }
   
-  double ppb = param.toFloat();
+  double ppb = atof(param);
   double ppm = ppb / 1000.0;  // Convert ppb input to ppm for internal use
   double pull_range = oscillator.getPullRange();
   
@@ -641,13 +651,12 @@ void cmd_reboot_to_bootloader() {
   }
 }
 
-void cmd_start_calibration_with_time(const String& command) {
-  String param = command.substring(1);
-  param.trim();
+void cmd_start_calibration_with_time(const char* command) {
+  const char* param = command + 1;  // Skip the command character
   
   // Set calibration duration
-  if (param.length() > 0) {
-    uint32_t duration = param.toInt();
+  if (strlen(param) > 0) {
+    uint32_t duration = atoi(param);
     if (duration < 10 || duration > 3600) {
       Serial.println("Error: Calibration time must be between 10 and 3600 seconds\r");
       return;
@@ -744,7 +753,8 @@ void cmd_start_calibration() {
 }
 
 void handle_serial_commands() {
-  static String command_buffer = "";
+  static char command_buffer[16] = "";  // Fixed-size buffer to prevent heap allocation
+  static uint8_t buffer_pos = 0;
   static bool reading_parameter_command = false;
 
   while (Serial.available()) {
@@ -764,10 +774,12 @@ void handle_serial_commands() {
 
         // Check if this is a parameter command that needs more input
       if (c == 'f' || c == 'p' || c == 'd' || c == 'x' || c == 'g' || c == 'l') {
-          command_buffer = String(c);
+          command_buffer[0] = c;
+          command_buffer[1] = '\0';
+          buffer_pos = 1;
           reading_parameter_command = true;
           continue;
-        }
+      }
 
       // Process single-character commands immediately
       process_single_command(c);
@@ -778,15 +790,18 @@ void handle_serial_commands() {
         Serial.println();
         // Process complete parameter command
         process_parameter_command(command_buffer);
-        command_buffer = "";
+        command_buffer[0] = '\0';
+        buffer_pos = 0;
         reading_parameter_command = false;
       } else if (c == 8 || c == 127) {  // Backspace or DEL
-        if (command_buffer.length() > 0) {
-          command_buffer.remove(command_buffer.length() - 1);
+        if (buffer_pos > 1) {  // Don't delete the command character
+          buffer_pos--;
+          command_buffer[buffer_pos] = '\0';
           Serial.print("\b \b");  // Backspace, space, backspace to erase character
         }
-      } else if (c >= 32 && c <= 126) {  // Printable characters only
-        command_buffer += c;
+      } else if (c >= 32 && c <= 126 && buffer_pos < sizeof(command_buffer) - 1) {  // Printable characters only
+        command_buffer[buffer_pos++] = c;
+        command_buffer[buffer_pos] = '\0';
         Serial.print(c);  // Echo the character
       }
     }
@@ -814,17 +829,16 @@ void process_single_command(char cmd) {
   Serial.println("\r");
 }
 
-void process_parameter_command(String command) {
-  command.trim();
-  command.toLowerCase();
+void process_parameter_command(const char* command) {
+  // No need to trim or toLowerCase with char array - handle directly
 
-  if (command.length() == 0) return;
+  if (command[0] == '\0') return;
 
-  char cmd = command.charAt(0);
+  char cmd = command[0];
 
   switch (cmd) {
     case 'f':
-      if (command.length() > 1) {
+      if (strlen(command) > 1) {
         Serial.println("Usage: f\r");
         break;
       }
@@ -833,8 +847,8 @@ void process_parameter_command(String command) {
     case 'p': cmd_set_oscillator_ppm(command); break;
     case 'l': cmd_start_calibration_with_time(command); break;
     case 'g':
-      if (command.length() == 2) {
-        char arg = command.charAt(1);
+      if (strlen(command) == 2) {
+        char arg = command[1];
         if (arg == '0') {
           pps_force_gpio(false);
           Serial.printf("PPS output forced LOW via GPIO on pin %d\r\n", GPT2_COMPARE_PIN);
@@ -1061,7 +1075,7 @@ void loop() {
   process_nmea_messages();
 
   DisplayStatus status;
-  bool pps_recent = (g_last_pps_millis != 0) && (millis() - g_last_pps_millis <= 10000);
+  bool pps_recent = (g_last_pps_millis != 0) && ((millis() - g_last_pps_millis) <= 10000);
   status.pps_locked = pps_recent;
   status.sample_count = g_sample_count;
   status.ppm_error = g_pps_data.ppm_instantaneous;
@@ -1069,7 +1083,7 @@ void loop() {
   status.utc_valid = g_gps_data.is_valid;
   if (status.utc_valid) {
     int year, month, day, hour, minute, second;
-    if (sscanf(g_gps_data.timestamp.c_str(), "%d-%d-%dT%d:%d:%dZ",
+    if (sscanf(g_gps_data.timestamp, "%d-%d-%dT%d:%d:%dZ",
                &year, &month, &day, &hour, &minute, &second) == 6) {
       status.utc.year = (uint16_t)year;
       status.utc.month = (uint8_t)month;
