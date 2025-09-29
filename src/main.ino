@@ -33,9 +33,58 @@ struct GpsData {
   bool is_valid;
 };
 
-// Global variables for frequency measurement
-static double g_sum_hz = 0.0;
-static uint32_t g_sample_count = 0;
+// Statistics class using Welford's algorithm for numerical stability
+class FrequencyStats {
+private:
+  double running_mean;
+  double running_m2;  // Sum of squares of differences from mean
+  uint32_t sample_count;
+
+public:
+  FrequencyStats() : running_mean(0.0), running_m2(0.0), sample_count(0) {}
+  
+  void reset() {
+    running_mean = 0.0;
+    running_m2 = 0.0;
+    sample_count = 0;
+  }
+  
+  void add_sample(double value) {
+    sample_count++;
+    double delta = value - running_mean;
+    running_mean += delta / sample_count;
+    double delta2 = value - running_mean;
+    running_m2 += delta * delta2;
+  }
+  
+  double get_mean() const { return running_mean; }
+  uint32_t get_count() const { return sample_count; }
+  
+  double get_variance() const {
+    return (sample_count > 1) ? (running_m2 / (sample_count - 1)) : 0.0;
+  }
+  
+  double get_std_dev() const {
+    return sqrt(get_variance());
+  }
+  
+  bool has_samples() const {
+    return sample_count > 0;
+  }
+  
+  // Get PPM error relative to reference frequency
+  double get_ppm_error(double reference_hz) const {
+    if (!has_samples()) return 0.0;
+    return ((running_mean - reference_hz) / reference_hz) * 1e6;
+  }
+  
+  // Get PPB error relative to reference frequency  
+  double get_ppb_error(double reference_hz) const {
+    return get_ppm_error(reference_hz) * 1000.0;
+  }
+};
+
+static FrequencyStats g_freq_stats;
 
 // Calibration state
 enum CalibrationState {
@@ -367,8 +416,7 @@ void setup() {
 
 
 void reset_measurement_stats() {
-  g_sum_hz = 0.0;
-  g_sample_count = 0;
+  g_freq_stats.reset();
 }
 
 uint16_t calculate_checksum(const EepromData& data) {
@@ -489,10 +537,9 @@ void cmd_set_output_frequency(const char* command) {
 
 
 void show_gpt2_status() {
-  Serial.printf("GPS PPS samples collected: %lu\r\n", g_sample_count);
-  if (g_sample_count > 0) {
-    double avg_hz = g_sum_hz / g_sample_count;
-    Serial.printf("Average measured frequency: %.6f MHz\r\n", avg_hz / 1e6);
+  Serial.printf("GPS PPS samples collected: %lu\r\n", g_freq_stats.get_count());
+  if (g_freq_stats.has_samples()) {
+    Serial.printf("Average measured frequency: %.6f MHz\r\n", g_freq_stats.get_mean() / 1e6);
   } else {
     Serial.println("No GPS PPS signals received yet\r");
   }
@@ -535,22 +582,21 @@ void show_calibration_status() {
   uint32_t remaining_seconds = g_calibration.duration_seconds - elapsed_seconds;
   
   double current_avg_ppm = 0.0;
-  if (g_sample_count > 0) {
-    double current_avg_hz = g_sum_hz / g_sample_count;
-    current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+  if (g_freq_stats.has_samples()) {
+    current_avg_ppm = g_freq_stats.get_ppm_error(10000000.0);
   }
   
   if (g_calibration.state == CAL_PHASE1_AVERAGING) {
     Serial.printf("Calibration Phase 1: %lu/%lu seconds (%lu remaining)\r\n", 
                   elapsed_seconds, g_calibration.duration_seconds, remaining_seconds);
     Serial.printf("Current average: %.1f ppb (%lu samples, %lu missed)\r\n", 
-                  current_avg_ppm * 1000.0, g_sample_count, g_calibration.missed_pulses);
+                  current_avg_ppm * 1000.0, g_freq_stats.get_count(), g_calibration.missed_pulses);
   } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
     Serial.printf("Calibration Phase 2: %lu/%lu seconds (%lu remaining)\r\n", 
                   elapsed_seconds, g_calibration.duration_seconds, remaining_seconds);
     Serial.printf("Applied correction: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
     Serial.printf("Current average: %.1f ppb (%lu samples, %lu missed)\r\n", 
-                  current_avg_ppm * 1000.0, g_sample_count, g_calibration.missed_pulses);
+                  current_avg_ppm * 1000.0, g_freq_stats.get_count(), g_calibration.missed_pulses);
   }
 }
 
@@ -692,7 +738,7 @@ void start_calibration_internal(bool auto_started) {
   g_calibration.state = CAL_PHASE1_AVERAGING;
   g_calibration.start_time = millis();
   g_calibration.phase1_result = 0.0;
-  g_calibration.expected_pulses = g_sample_count;  // Track expected pulses from current count
+  g_calibration.expected_pulses = g_freq_stats.get_count();  // Track expected pulses from current count
   g_calibration.missed_pulses = 0;
   
   if (auto_started) {
@@ -886,15 +932,15 @@ void process_frequency_measurement() {
     return;
   }
 
-  g_sum_hz += freq_hz;
-  g_sample_count++;
+  // Update running statistics using Welford's algorithm for numerical stability
+  g_freq_stats.add_sample(freq_hz);
   g_last_pps_millis = millis();
 
   // Store frequency measurement data in PPS struct
   g_pps_data.ticks = ticks;  // ticks = freq_hz for 1 second PPS
-  g_pps_data.avg_freq_hz = (g_sample_count == 0) ? 0.0 : (g_sum_hz / (double)g_sample_count);
+  g_pps_data.avg_freq_hz = g_freq_stats.get_mean();
   g_pps_data.ppm_instantaneous = ((freq_hz - ref_hz) / ref_hz) * 1e6;
-  g_pps_data.ppm_average = ((g_pps_data.avg_freq_hz - ref_hz) / ref_hz) * 1e6;
+  g_pps_data.ppm_average = g_freq_stats.get_ppm_error(ref_hz);
   g_pps_data.has_data = true;
   
 
@@ -903,7 +949,7 @@ void process_frequency_measurement() {
     double freq_mhz = g_pps_data.ticks / 1e6;  // Calculate MHz from ticks
     double avg_freq_mhz = g_pps_data.avg_freq_hz / 1e6;  // Calculate avg MHz
     Serial.printf("t=%lus ticks=%6d latest=%.6f MHz avg=%.12f MHz ppb(lat)=%.1f ppb(avg)=%.1f\r\n",
-                  (unsigned long)g_sample_count, g_pps_data.ticks, freq_mhz, 
+                  (unsigned long)g_freq_stats.get_count(), g_pps_data.ticks, freq_mhz, 
                   avg_freq_mhz, g_pps_data.ppm_instantaneous * 1000.0, g_pps_data.ppm_average * 1000.0);
   }
 }
@@ -935,8 +981,8 @@ void process_calibration() {
   
   // Check for missed pulses during calibration
   uint32_t expected_pulses_now = g_calibration.expected_pulses + elapsed_seconds;
-  if (g_sample_count < expected_pulses_now) {
-    uint32_t current_missed = expected_pulses_now - g_sample_count;
+  if (g_freq_stats.get_count() < expected_pulses_now) {
+    uint32_t current_missed = expected_pulses_now - g_freq_stats.get_count();
     if (current_missed > g_calibration.missed_pulses) {
       g_calibration.missed_pulses = current_missed;
       if (g_calibration.missed_pulses > 10) {
@@ -962,29 +1008,29 @@ void process_calibration() {
     
     if (g_calibration.state == CAL_PHASE1_AVERAGING) {
       double current_avg_ppm = 0.0;
-      if (g_sample_count > 0) {
-        double current_avg_hz = g_sum_hz / g_sample_count;
+      if (g_freq_stats.get_count() > 0) {
+        double current_avg_hz = g_freq_stats.get_mean();
         current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
       }
       Serial.printf("Calibration Phase 1: %lu seconds remaining, current avg: %.1f ppb (%lu samples)\r\n", 
-                    remaining_seconds, current_avg_ppm * 1000.0, g_sample_count);
+                    remaining_seconds, current_avg_ppm * 1000.0, g_freq_stats.get_count());
     } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
       double current_avg_ppm = 0.0;
-      if (g_sample_count > 0) {
-        double current_avg_hz = g_sum_hz / g_sample_count;
+      if (g_freq_stats.get_count() > 0) {
+        double current_avg_hz = g_freq_stats.get_mean();
         current_avg_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
       }
       Serial.printf("Calibration Phase 2: %lu seconds remaining, current avg: %.1f ppb (%lu samples)\r\n", 
-                    remaining_seconds, current_avg_ppm * 1000.0, g_sample_count);
+                    remaining_seconds, current_avg_ppm * 1000.0, g_freq_stats.get_count());
     }
   }
   
   if (elapsed_seconds >= g_calibration.duration_seconds) {  // Duration completed
     if (g_calibration.state == CAL_PHASE1_AVERAGING) {
       // Phase 1 complete - calculate average and start phase 2
-      if (g_sample_count > 0) {
-        g_calibration.phase1_result = g_sum_hz / g_sample_count;
-        double avg_ppm = ((g_calibration.phase1_result - 10000000.0) / 10000000.0) * 1e6;
+      if (g_freq_stats.has_samples()) {
+        g_calibration.phase1_result = g_freq_stats.get_mean();
+        double avg_ppm = g_freq_stats.get_ppm_error(10000000.0);
         
         Serial.printf("Phase 1 complete. Average frequency: %.12f Hz (%.1f ppb error)\r\n", 
                       g_calibration.phase1_result, avg_ppm * 1000.0);
@@ -1000,7 +1046,7 @@ void process_calibration() {
         reset_measurement_stats();
         g_calibration.state = CAL_PHASE2_AVERAGING;
         g_calibration.start_time = millis();
-        g_calibration.expected_pulses = g_sample_count;  // Reset expected pulse count for phase 2
+        g_calibration.expected_pulses = g_freq_stats.get_count();  // Reset expected pulse count for phase 2
         g_calibration.missed_pulses = 0;  // Reset missed pulse count for phase 2
         last_progress_report = 0;
       } else {
@@ -1009,9 +1055,9 @@ void process_calibration() {
       }
     } else if (g_calibration.state == CAL_PHASE2_AVERAGING) {
       // Phase 2 complete - report final results
-      if (g_sample_count > 0) {
-        double phase2_avg = g_sum_hz / g_sample_count;
-        double phase2_ppm = ((phase2_avg - 10000000.0) / 10000000.0) * 1e6;
+      if (g_freq_stats.has_samples()) {
+        double phase2_avg = g_freq_stats.get_mean();
+        double phase2_ppm = g_freq_stats.get_ppm_error(10000000.0);
         
         Serial.println("\r\n=== CALIBRATION COMPLETE ===\r");
         Serial.printf("Phase 1 average: %.12f Hz (%.1f ppb error)\r\n", 
@@ -1047,7 +1093,7 @@ void check_auto_calibration() {
   
   // Check if we have no calibration offset (indicating no previous calibration)
   // and we have received more than 10 GPS PPS pulses
-  if (g_frequency_offset_ppm == 0.0 && g_sample_count > 10) {
+  if (g_frequency_offset_ppm == 0.0 && g_freq_stats.get_count() > 10) {
     Serial.println("\r\nAuto-calibration trigger: No calibration offset detected after 10+ GPS pulses.\r");
     start_calibration_internal(true);
   }
@@ -1077,7 +1123,7 @@ void loop() {
   DisplayStatus status;
   bool pps_recent = (g_last_pps_millis != 0) && ((millis() - g_last_pps_millis) <= 10000);
   status.pps_locked = pps_recent;
-  status.sample_count = g_sample_count;
+  status.sample_count = g_freq_stats.get_count();
   status.ppm_error = g_pps_data.ppm_instantaneous;
   status.ppm_average = g_pps_data.ppm_average;
   status.utc_valid = g_gps_data.is_valid;
@@ -1111,9 +1157,8 @@ void loop() {
     status.cal_phase = (g_calibration.state == CAL_PHASE1_AVERAGING) ? 1 : 2;
     
     // Calculate current average PPM
-    if (g_sample_count > 0) {
-      double current_avg_hz = g_sum_hz / g_sample_count;
-      status.cal_current_ppm = ((current_avg_hz - 10000000.0) / 10000000.0) * 1e6;
+    if (g_freq_stats.has_samples()) {
+      status.cal_current_ppm = g_freq_stats.get_ppm_error(10000000.0);
     } else {
       status.cal_current_ppm = 0.0;
     }

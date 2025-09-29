@@ -130,7 +130,14 @@ void gpt2_poll_capture() {
     // Toggle action and schedule next target
     compare_high = !compare_high;
     uint32_t action_bits = compare_high ? 0x3 : 0x2; // set or clear output
-    compare_target_ticks += 5000000;
+    
+    // Handle potential overflow by wrapping around (timer hardware handles this correctly)
+    uint32_t next_target = compare_target_ticks + 5000000;
+    if (next_target < compare_target_ticks) {
+      // Overflow occurred - this is expected and handled by hardware
+    }
+    compare_target_ticks = next_target;
+    
     GPT2_CR = (GPT2_CR & ~GPT_CR_OM1(0x7)) | GPT_CR_OM1(action_bits);
     GPT2_OCR1 = compare_target_ticks;
     gpt2_output_high = compare_high;
