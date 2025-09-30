@@ -281,13 +281,13 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
         # Add normalized filtered data (centered around zero)
         ppb_mean = ppb_error.mean()
         ppb_error_normalized = ppb_error_filtered - ppb_mean
-        fig.add_trace(go.Scatter(
-            x=x_data,
-            y=ppb_error_normalized, 
-            name="Normalized PPB Error", 
-            mode='lines',
-            line=dict(color='green', width=2)
-        ))
+#        fig.add_trace(go.Scatter(
+#            x=x_data,
+#            y=ppb_error_normalized, 
+#            name="Normalized PPB Error", 
+#            mode='lines',
+#            line=dict(color='green', width=2)
+#        ))
     
     # Calculate statistics
     ppb_mean = ppb_error.mean()
@@ -307,7 +307,8 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
         xaxis_title=x_title,
         yaxis_title="Error (PPB)",
         showlegend=True,
-        hovermode='x unified'
+        hovermode='x unified',
+        yaxis_range=[-11, 11],
     )
     
     return fig
