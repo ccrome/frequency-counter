@@ -63,6 +63,11 @@ void display_update(DisplayStatus const& status) {
   display.print(F("Lock: "));
   display.println(status.pps_locked ? F("YES") : F("NO"));
 
+  // Show uptime since reboot in total seconds
+  display.print(F("Up: "));
+  display.print(status.uptime_seconds);
+  display.println(F("s"));
+
   int16_t indicator_x = 3;
   int16_t indicator_y = SCREEN_HEIGHT-4;
   if (status.output_high) {

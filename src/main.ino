@@ -1127,6 +1127,7 @@ void loop() {
   status.ppm_error = g_pps_data.ppm_instantaneous;
   status.ppm_average = g_pps_data.ppm_average;
   status.utc_valid = g_gps_data.is_valid;
+  status.uptime_seconds = millis() / 1000;  // Convert milliseconds to seconds
   if (status.utc_valid) {
     int year, month, day, hour, minute, second;
     if (sscanf(g_gps_data.timestamp, "%d-%d-%dT%d:%d:%dZ",

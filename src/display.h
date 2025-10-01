@@ -20,6 +20,7 @@ struct DisplayStatus {
   bool utc_valid;
   DisplayUtcTime utc;
   bool output_high;
+  uint32_t uptime_seconds;  // Seconds since reboot
   
   // Calibration status
   bool calibrating;
