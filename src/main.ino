@@ -123,16 +123,26 @@ static uint32_t g_last_pps_millis = 0;
 // Persistent frequency offset (stored in EEPROM)
 static double g_frequency_offset_ppm = 0.0;  // Default 0.0 ppm (originally 15.26 ppb = 0.01526 ppm)
 
-// EEPROM data structure
-struct EepromData {
+// EEPROM data structure (version 1 - for migration)
+struct EepromDataV1 {
   uint32_t magic;              // Magic number for validity check
   uint16_t version;            // Data structure version
   double frequency_offset_ppm; // Frequency offset in PPM
   uint16_t checksum;           // Simple checksum for data integrity
 };
 
+// EEPROM data structure (version 2 - current)
+struct EepromData {
+  uint32_t magic;              // Magic number for validity check
+  uint16_t version;            // Data structure version
+  double frequency_offset_ppm; // Frequency offset in PPM
+  uint8_t duty_cycle_percent;  // PPS output duty cycle percentage
+  uint8_t reserved;            // Reserved for future use (alignment)
+  uint16_t checksum;           // Simple checksum for data integrity
+};
+
 static const uint32_t EEPROM_MAGIC = 0x12345678;
-static const uint16_t EEPROM_VERSION = 1;
+static const uint16_t EEPROM_VERSION = 2;  // Incremented for new structure
 static const int EEPROM_DATA_ADDR = 0;
 
 
@@ -311,6 +321,8 @@ void print_output_commands() {
   Serial.println("Output Generation (Always Active):\r");
   Serial.println("  f       - Re-arm GPT-driven 1 PPS output\r");
   Serial.println("  g0/g1   - Force PPS output low/high via GPIO\r");
+  Serial.println("  d       - Show current PPS output duty cycle\r");
+  Serial.println("  d<pct>  - Set PPS output duty cycle (20-80%, e.g., d20 or d50)\r");
 }
 
 void print_oscillator_commands() {
@@ -325,6 +337,7 @@ void print_other_commands() {
   Serial.println("Other:\r");
   Serial.println("  h       - Show this help\r");
   Serial.println("  v       - Toggle verbose timing output (currently OFF)\r");
+  Serial.println("  x       - Clear EEPROM and reset all settings to defaults\r");
   Serial.println("  b       - Reboot to bootloader mode\r");
 }
 
@@ -403,7 +416,7 @@ void setup() {
   } else {
     Serial.println("OLED display unavailable, continuing without it\r");
   }
-  load_frequency_offset();  // Load persistent frequency offset
+  load_settings();  // Load persistent settings (frequency offset and duty cycle)
 
   print_help();
   Serial.println("System initialized. 1 PPS output active, GPS PPS monitoring enabled.\r\n");
@@ -432,15 +445,72 @@ uint16_t calculate_checksum(const EepromData& data) {
   return checksum;
 }
 
-void load_frequency_offset() {
+uint16_t calculate_checksum_v1(const EepromDataV1& data) {
+  uint16_t checksum = 0;
+  const uint8_t* bytes = (const uint8_t*)&data;
+  
+  // Calculate checksum for all fields except checksum itself
+  size_t checksum_offset = offsetof(EepromDataV1, checksum);
+  for (size_t i = 0; i < checksum_offset; i++) {
+    checksum += bytes[i];
+  }
+  
+  return checksum;
+}
+
+bool migrate_from_v1() {
+  EepromDataV1 old_data;
+  EEPROM.get(EEPROM_DATA_ADDR, old_data);
+  
+  // Validate V1 data
+  if (old_data.magic != EEPROM_MAGIC || old_data.version != 1) {
+    return false;  // Not valid V1 data
+  }
+  
+  // Validate V1 checksum
+  uint16_t calculated_checksum = calculate_checksum_v1(old_data);
+  if (old_data.checksum != calculated_checksum) {
+    Serial.println("V1 EEPROM checksum invalid, cannot migrate\r");
+    return false;
+  }
+  
+  // Validate frequency offset range
+  double pull_range = oscillator.isPresent() ? oscillator.getPullRange() : 50.0;
+  if (isnan(old_data.frequency_offset_ppm) || 
+      old_data.frequency_offset_ppm < -pull_range || 
+      old_data.frequency_offset_ppm > pull_range) {
+    Serial.printf("V1 frequency offset out of range (±%.0f ppb), cannot migrate\r\n", pull_range * 1000.0);
+    return false;
+  }
+  
+  // Migration successful - preserve PPM offset, set default duty cycle
+  g_frequency_offset_ppm = old_data.frequency_offset_ppm;
+  gpt2_set_duty_cycle(20);  // Default duty cycle for migration
+  
+  Serial.printf("Migrated from EEPROM V1: frequency offset %.1f ppb, duty cycle set to default 20%%\r\n", 
+                g_frequency_offset_ppm * 1000.0);
+  
+  // Save as V2 format
+  save_settings();
+  
+  return true;
+}
+
+void load_settings() {
   EepromData data;
   EEPROM.get(EEPROM_DATA_ADDR, data);
   
   // Validate magic number and version
   if (data.magic != EEPROM_MAGIC || data.version != EEPROM_VERSION) {
+    // Try to migrate from V1 before using defaults
+    if (migrate_from_v1()) {
+      return;  // Migration successful, settings are now loaded and saved as V2
+    }
+    
     Serial.println("EEPROM data invalid or outdated, using defaults\r");
     g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
-    save_frequency_offset();
+    gpt2_set_duty_cycle(20);       // Default to 20% duty cycle
+    save_settings();
     return;
   }
   
@@ -449,7 +519,8 @@ void load_frequency_offset() {
   if (data.checksum != calculated_checksum) {
     Serial.println("EEPROM checksum invalid, using defaults\r");
     g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
-    save_frequency_offset();
+    gpt2_set_duty_cycle(20);       // Default to 20% duty cycle
+    save_settings();
     return;
   }
   
@@ -458,23 +529,36 @@ void load_frequency_offset() {
   if (isnan(data.frequency_offset_ppm) || data.frequency_offset_ppm < -pull_range || data.frequency_offset_ppm > pull_range) {
     Serial.printf("EEPROM frequency offset out of range (±%.0f ppb), using defaults\r\n", pull_range * 1000.0);
     g_frequency_offset_ppm = 0.0;  // Default to 0 ppm
-    save_frequency_offset();
+    gpt2_set_duty_cycle(20);       // Default to 20% duty cycle
+    save_settings();
     return;
+  }
+  
+  // Validate duty cycle range
+  if (data.duty_cycle_percent < 20 || data.duty_cycle_percent > 80) {
+    Serial.printf("EEPROM duty cycle out of range (%u%%), using default 20%%\r\n", data.duty_cycle_percent);
+    gpt2_set_duty_cycle(20);       // Default to 20% duty cycle
+  } else {
+    gpt2_set_duty_cycle(data.duty_cycle_percent);
+    Serial.printf("Loaded duty cycle: %u%%\r\n", data.duty_cycle_percent);
   }
   
   g_frequency_offset_ppm = data.frequency_offset_ppm;
   Serial.printf("Loaded frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
 }
 
-void save_frequency_offset() {
+void save_settings() {
   EepromData data;
   data.magic = EEPROM_MAGIC;
   data.version = EEPROM_VERSION;
   data.frequency_offset_ppm = g_frequency_offset_ppm;
+  data.duty_cycle_percent = gpt2_get_duty_cycle();
+  data.reserved = 0;  // Clear reserved field
   data.checksum = calculate_checksum(data);
   
   EEPROM.put(EEPROM_DATA_ADDR, data);
-  Serial.printf("Saved frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+  Serial.printf("Saved frequency offset: %.1f ppb, duty cycle: %u%%\r\n", 
+                g_frequency_offset_ppm * 1000.0, data.duty_cycle_percent);
 }
 
 bool initialize_sd_card() {
@@ -554,6 +638,7 @@ void show_gpt2_status() {
   Serial.printf("  Pin %d: PPS output enable\r\n", PPS_OE);
   Serial.printf("  Pin %d: 1 PPS output (always active)\r\n", GPT2_COMPARE_PIN);
   
+  Serial.printf("PPS Output Duty Cycle: %u%%\r\n", gpt2_get_duty_cycle());
   Serial.printf("GPT2 Counter: %lu\r\n", GPT2_CNT);
   Serial.printf("GPT2 Control: 0x%08lX\r\n", GPT2_CR);
   Serial.printf("Compare Register: %lu\r\n", GPT2_OCR1);
@@ -635,7 +720,7 @@ void cmd_set_oscillator_ppm(const char* command) {
   if (oscillator.setFrequencyOffsetPPM(ppm)) {
     // Update global variable and save to EEPROM
     g_frequency_offset_ppm = ppm;
-    save_frequency_offset();
+    save_settings();
     Serial.printf("Oscillator frequency offset set to %.1f ppb and saved to EEPROM\r\n", ppb);
   } else {
     Serial.println("Error: Failed to set oscillator frequency offset\r");
@@ -668,6 +753,74 @@ void cmd_oscillator_output_enable(bool enable) {
   } else {
     Serial.printf("Error %s oscillator output\r\n", enable ? "enabling" : "disabling");
   }
+}
+
+void cmd_set_duty_cycle(const char* command) {
+  const char* param = command + 1;  // Skip the command character
+  
+  if (strlen(param) == 0) {
+    // Show current duty cycle
+    Serial.printf("Current PPS output duty cycle: %u%%\r\n", gpt2_get_duty_cycle());
+    return;
+  }
+  
+  int duty_cycle = atoi(param);
+  
+  if (duty_cycle < 20 || duty_cycle > 80) {
+    Serial.println("Error: Duty cycle must be between 20 and 80 percent\r");
+    return;
+  }
+  
+  gpt2_set_duty_cycle((uint8_t)duty_cycle);
+  save_settings();  // Save both frequency offset and duty cycle to EEPROM
+  Serial.printf("PPS output duty cycle set to %u%% and saved to EEPROM\r\n", gpt2_get_duty_cycle());
+}
+
+void cmd_clear_eeprom() {
+  Serial.println("\r\n=== CLEAR EEPROM ===\r");
+  Serial.println("This will erase all saved settings and reset to defaults:\r");
+  Serial.println("- Frequency offset: 0.0 ppb\r");
+  Serial.println("- Duty cycle: 20%\r");
+  Serial.println("\r");
+  Serial.println("WARNING: This action cannot be undone!\r");
+  Serial.println("Type 'y' to clear EEPROM, any other key to cancel: ");
+  
+  // Wait for user confirmation
+  while (!Serial.available()) {
+    delay(10);
+  }
+  
+  char response = Serial.read();
+  Serial.println(response); // Echo the response
+  
+  // Clear any remaining characters
+  while (Serial.available()) {
+    Serial.read();
+  }
+  
+  if (response != 'y' && response != 'Y') {
+    Serial.println("EEPROM clear cancelled.\r");
+    return;
+  }
+  
+  Serial.println("Clearing EEPROM...\r");
+  
+  // Reset to defaults
+  g_frequency_offset_ppm = 0.0;
+  gpt2_set_duty_cycle(20);
+  
+  // Apply the defaults to hardware
+  if (oscillator.isPresent()) {
+    oscillator.setFrequencyOffsetPPM(0.0);
+  }
+  
+  // Save defaults to EEPROM (this overwrites the old data)
+  save_settings();
+  
+  Serial.println("EEPROM cleared and reset to defaults.\r");
+  Serial.println("System settings:\r");
+  Serial.printf("- Frequency offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
+  Serial.printf("- Duty cycle: %u%%\r\n", gpt2_get_duty_cycle());
 }
 
 
@@ -868,6 +1021,7 @@ void process_single_command(char cmd) {
       g_verbose_timing = !g_verbose_timing;
       Serial.printf("Verbose timing: %s\r\n", g_verbose_timing ? "ON" : "OFF");
       break;
+    case 'x': cmd_clear_eeprom(); break;
     default:
       Serial.println("Unknown command. Type 'h' for help.\r");
       break;
@@ -892,6 +1046,7 @@ void process_parameter_command(const char* command) {
       break;
     case 'p': cmd_set_oscillator_ppm(command); break;
     case 'l': cmd_start_calibration_with_time(command); break;
+    case 'd': cmd_set_duty_cycle(command); break;
     case 'g':
       if (strlen(command) == 2) {
         char arg = command[1];
@@ -1069,7 +1224,7 @@ void process_calibration() {
         Serial.printf("Final oscillator offset: %.1f ppb\r\n", g_frequency_offset_ppm * 1000.0);
         
         // Save the new offset to EEPROM
-        save_frequency_offset();
+        save_settings();
         Serial.println("Calibration offset saved to EEPROM\r");
       } else {
         Serial.println("Calibration failed: No GPS PPS data received during phase 2\r");

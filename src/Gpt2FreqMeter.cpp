@@ -11,6 +11,7 @@ static volatile bool gpt2_running = false;
 static uint32_t compare_target_ticks = 10000000;
 static bool compare_high = true;
 static bool gpt2_output_high = false;
+static uint8_t duty_cycle_percent = 20;  // Default 20% duty cycle
 
 void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, bool use_external_clock) {
   (void)output_freq_hz;  // Fixed 1 PPS output
@@ -75,9 +76,12 @@ void gpt2_begin_dual_mode(uint32_t output_freq_hz, GptCaptureEdge capture_edge, 
   GPT2_CR &= ~GPT_CR_OM1(0x7);
   GPT2_CR |= GPT_CR_OM1(0x3);  // Set output high on compare
 
-  // Initialize compare schedule
-  compare_target_ticks = 10000000;
-  compare_high = true;
+  // Initialize compare schedule for configurable duty cycle
+  // Start with LOW period first to get correct polarity
+  uint32_t high_ticks = (10000000UL * duty_cycle_percent) / 100;
+  uint32_t low_ticks = 10000000UL - high_ticks;
+  compare_target_ticks = low_ticks;
+  compare_high = true;  // Next transition will be to HIGH
   GPT2_OCR1 = compare_target_ticks;
   gpt2_output_high = false;
 
@@ -127,12 +131,18 @@ void gpt2_poll_capture() {
   if (sr & GPT_SR_OF1) {
     GPT2_SR = GPT_SR_OF1;  // clear compare flag
 
-    // Toggle action and schedule next target
+    // Toggle action and schedule next target for configurable duty cycle
     compare_high = !compare_high;
     uint32_t action_bits = compare_high ? 0x3 : 0x2; // set or clear output
     
+    // Calculate intervals based on duty cycle percentage
+    // Note: Timer starts HIGH, so we need to swap the logic
+    uint32_t high_ticks = (10000000UL * duty_cycle_percent) / 100;
+    uint32_t low_ticks = 10000000UL - high_ticks;
+    uint32_t next_interval = compare_high ? low_ticks : high_ticks;
+    
     // Handle potential overflow by wrapping around (timer hardware handles this correctly)
-    uint32_t next_target = compare_target_ticks + 5000000;
+    uint32_t next_target = compare_target_ticks + next_interval;
     if (next_target < compare_target_ticks) {
       // Overflow occurred - this is expected and handled by hardware
     }
@@ -155,4 +165,14 @@ bool gpt2_is_running() {
 
 bool gpt2_is_output_high() {
   return gpt2_output_high;
+}
+
+void gpt2_set_duty_cycle(uint8_t percent) {
+  if (percent > 80) percent = 80;
+  if (percent < 20) percent = 20;
+  duty_cycle_percent = percent;
+}
+
+uint8_t gpt2_get_duty_cycle() {
+  return duty_cycle_percent;
 }

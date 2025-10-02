@@ -24,3 +24,7 @@ void gpt2_poll_capture();
 void gpt2_stop();
 bool gpt2_is_running();
 bool gpt2_is_output_high();
+
+// Duty Cycle Control
+void gpt2_set_duty_cycle(uint8_t percent);
+uint8_t gpt2_get_duty_cycle();
