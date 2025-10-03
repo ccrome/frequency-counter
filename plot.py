@@ -6,6 +6,84 @@ import os
 import sys
 import argparse
 from scipy.signal import butter, filtfilt, sosfiltfilt
+import allantools
+
+
+def plot_allan_deviation(df):
+
+    ppm_col = 'ppm_instantaneous'
+    ppb = np.array(df[ppm_col]) * 1000
+    (tau, adev, adev_err, n) = allantools.oadev(ppb, rate=1.0, data_type="freq")
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=tau,
+        y=adev,
+        mode="markers+lines",
+        name="Allan deviation"
+    ))
+
+    fig.update_xaxes(title="Averaging Time τ (s)", type="log")
+    fig.update_yaxes(title="Allan Deviation (ppb)", type="log")
+
+    fig.update_layout(
+        title="Allan Deviation",
+        template="plotly_white"
+    )
+    return fig
+import numpy as np
+import plotly.graph_objects as go
+import allantools
+
+def plot_allan_deviation(df):
+    ppm_col = 'ppm_instantaneous'
+    ppb = np.array(df[ppm_col]) * 1000
+    (tau, adev, adev_err, n) = allantools.oadev(ppb, rate=1.0, data_type="freq")
+
+    fig = go.Figure()
+
+    # main Allan deviation
+    fig.add_trace(go.Scatter(
+        x=tau,
+        y=adev,
+        mode="markers+lines",
+        name="Allan deviation"
+    ))
+
+    # add reference slopes
+    slopes = {
+        "-1 (white phase noise)": -1,
+        "-0.5 (flicker phase noise)": -0.5,
+        "0 (white freq noise)": 0,
+        "+0.5 (flicker freq noise)": 0.5,
+        "+1 (random walk freq noise)": 1
+    }
+
+    # choose anchor near middle
+    anchor_idx = len(tau) // 2
+    anchor_tau = tau[anchor_idx]
+    anchor_adev = adev[anchor_idx]
+
+    tau_fit = np.logspace(np.log10(min(tau)), np.log10(max(tau)), 200)
+
+    for label, slope in slopes.items():
+        ref_line = anchor_adev * (tau_fit / anchor_tau) ** slope
+        fig.add_trace(go.Scatter(
+            x=tau_fit,
+            y=ref_line,
+            mode="lines",
+            line=dict(dash="dot"),
+            name=label
+        ))
+
+    fig.update_xaxes(title="Averaging Time τ (s)", type="log")
+    fig.update_yaxes(title="Allan Deviation (ppb)", type="log")
+    fig.update_layout(
+        title="Allan Deviation with Reference Slopes",
+        template="plotly_white"
+    )
+    return fig
+
 
 def load_log_file(filepath):
     """
@@ -249,8 +327,12 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
     # Convert PPM to PPB (1 ppm = 1000 ppb)
     ppb_error = df[ppm_col] * 1000
     
-    # Create x-axis (use timestamp if available, otherwise sample number)
-    if 'timestamp' in df.columns:
+    # Create x-axis using GPS timestamp if available
+    if 'gps_timestamp' in df.columns:
+        # Convert GPS timestamp to datetime
+        x_data = pd.to_datetime(df['gps_timestamp'])
+        x_title = "GPS Time (UTC)"
+    elif 'timestamp' in df.columns:
         x_data = df['timestamp']
         x_title = "Time"
     else:
@@ -313,13 +395,108 @@ def plot_ppm_analysis(df, show_filtered=True, cutoff_freq=0.1):
     
     return fig
 
+def create_combined_html(freq_fig, allan_fig, map_fig=None, output_file='frequency_analysis.html'):
+    """
+    Create a single HTML file with all plots embedded.
+    
+    Args:
+        freq_fig: Frequency analysis plot
+        allan_fig: Allan deviation plot
+        map_fig: GPS map plot (optional)
+        output_file: Output filename
+    """
+    from plotly.offline import plot
+    import plotly.io as pio
+    
+    # Convert plots to HTML divs
+    freq_html = plot(freq_fig, output_type='div', include_plotlyjs=False)
+    allan_html = plot(allan_fig, output_type='div', include_plotlyjs=False)
+    
+    map_section = ""
+    if map_fig:
+        map_html = plot(map_fig, output_type='div', include_plotlyjs=False)
+        map_section = f"""
+    <div class="plot-section">
+        <h2>GPS Track</h2>
+        {map_html}
+    </div>"""
+    
+    # Create combined HTML
+    combined_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frequency Counter Analysis</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {{ 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            background-color: #f8f9fa;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .plot-section {{ 
+            margin: 30px 0; 
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            background-color: #fafafa;
+        }}
+        h1 {{ 
+            color: #2c3e50; 
+            text-align: center;
+            border-bottom: 3px solid #3498db; 
+            padding-bottom: 15px;
+            margin-bottom: 30px;
+        }}
+        h2 {{ 
+            color: #34495e; 
+            border-bottom: 2px solid #bdc3c7; 
+            padding-bottom: 10px;
+            margin-top: 0;
+        }}
+        .plotly-graph-div {{
+            border-radius: 4px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Frequency Counter Analysis</h1>
+        
+        <div class="plot-section">
+            <h2>Frequency Stability Analysis</h2>
+            {freq_html}
+        </div>
+        
+        <div class="plot-section">
+            <h2>Allan Deviation Analysis</h2>
+            {allan_html}
+        </div>
+        {map_section}
+    </div>
+</body>
+</html>
+"""
+    
+    with open(output_file, 'w') as f:
+        f.write(combined_html)
+    
+    print(f"Combined analysis saved to {output_file}")
+
 def main():
     parser = argparse.ArgumentParser(description='Plot frequency counter log files')
     parser.add_argument('files', nargs='+', help='JSONL log files to plot')
     parser.add_argument('--cutoff', type=float, default=0.001, help='Filter cutoff frequency (default: 0.001)')
     parser.add_argument('--no-filter', action='store_true', help='Disable filtering')
-    parser.add_argument('--output', help='Save plot to HTML file instead of showing')
-    parser.add_argument('--map-only', action='store_true', help='Show only GPS map')
+    parser.add_argument('--output', default='frequency_analysis.html', help='Output HTML file (default: frequency_analysis.html)')
     parser.add_argument('--no-map', action='store_true', help='Disable GPS map')
     
     args = parser.parse_args()
@@ -338,86 +515,19 @@ def main():
     
     print(f"Loaded {len(df)} total records")
     
-    # Create plots
-    if args.map_only:
-        # Only show GPS map
+    # Create all plots
+    freq_fig = plot_ppm_analysis(df, show_filtered=not args.no_filter, cutoff_freq=args.cutoff)
+    allan_fig = plot_allan_deviation(df)
+    
+    # Create GPS map if requested and available
+    map_fig = None
+    if not args.no_map:
         map_fig = plot_gps_map(df)
-        if map_fig:
-            if args.output:
-                map_fig.write_html(args.output)
-                print(f"GPS map saved to {args.output}")
-            else:
-                map_fig.show()
-        else:
+        if not map_fig:
             print("No GPS data found for mapping")
-    else:
-        # Create frequency analysis plot
-        freq_fig = plot_ppm_analysis(df, show_filtered=not args.no_filter, cutoff_freq=args.cutoff)
-        
-        # Create GPS map if requested and available
-        map_fig = None
-        if not args.no_map:
-            map_fig = plot_gps_map(df)
-        
-        # Always save to files, never show interactively
-        if args.output:
-            base_name = args.output.replace('.html', '')
-            freq_file = f"{base_name}_frequency.html"
-            map_file = f"{base_name}_map.html"
-            
-            # Save individual plots
-            freq_fig.write_html(freq_file)
-            print(f"Frequency plot saved to {freq_file}")
-            
-            if map_fig:
-                map_fig.write_html(map_file)
-                print(f"Map plot saved to {map_file}")
-                
-                # Create simple combined HTML with iframes
-                combined_html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Frequency Counter Analysis</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .plot-section {{ margin: 20px 0; }}
-        h2 {{ color: #333; border-bottom: 2px solid #ddd; padding-bottom: 10px; }}
-        iframe {{ width: 100%; height: 600px; border: none; }}
-    </style>
-</head>
-<body>
-    <h1>Frequency Counter Analysis</h1>
     
-    <div class="plot-section">
-        <h2>Frequency Stability Analysis</h2>
-        <iframe src="{freq_file}"></iframe>
-    </div>
-    
-    <div class="plot-section">
-        <h2>GPS Track</h2>
-        <iframe src="{map_file}"></iframe>
-    </div>
-</body>
-</html>
-"""
-                
-                with open(args.output, 'w') as f:
-                    f.write(combined_html)
-                print(f"Combined view saved to {args.output}")
-            else:
-                # Just rename the frequency file to the output name
-                import shutil
-                shutil.move(freq_file, args.output)
-                print(f"Frequency plot saved to {args.output}")
-        else:
-            # Default filenames when no output specified
-            freq_fig.write_html("frequency_analysis.html")
-            print("Frequency plot saved to frequency_analysis.html")
-            
-            if map_fig:
-                map_fig.write_html("gps_map.html")
-                print("GPS map saved to gps_map.html")
+    # Create combined HTML file
+    create_combined_html(freq_fig, allan_fig, map_fig, args.output)
 
 if __name__ == "__main__":
     main()
