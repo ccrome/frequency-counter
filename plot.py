@@ -131,8 +131,9 @@ def load_json_log(filepath):
                 except json.JSONDecodeError as e:
                     print(f"Skipping malformed JSON line {line_num} in {filepath}: {e}")
                     continue  # Skip malformed lines
-    
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    df = df[(df['ticks'] >= 9_999_999) & (df['ticks'] <= 10_000_001)]
+    return df
 
 def load_multiple_files(filepaths):
     """Load and combine multiple log files."""
