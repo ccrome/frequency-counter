@@ -396,7 +396,7 @@ void initialize_oscillator() {
 void initialize_mtp() {
     if (g_sd_available) {
 	MTP.begin();
-	MTP.addFilesystem(SD, "SD Card", MTP_FSTYPE_SD);
+	MTP.addFilesystem(SD, "SD Card");
     }
 }
     
@@ -404,6 +404,7 @@ void setup() {
   Serial1.begin(9600);
   setup_pins();
   Serial.begin(115200);
+  SerialUSB1.begin(115200);
   wait_for_serial();
 
   print_startup_info();
@@ -1256,7 +1257,13 @@ void check_auto_calibration() {
 
 void process_nmea_messages(void) {
     while (Serial1.available()) {
-	parser.encode((char)Serial1.read());
+      int c = Serial1.read();
+	    parser.encode((char)c);
+      SerialUSB1.write(c);
+    }
+    while (SerialUSB1.available()) {
+      int c = SerialUSB1.read();
+      Serial1.write(c);
     }
 }
 
